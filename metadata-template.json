@@ -1,48 +1,64 @@
 {
-  "kode_kelompok": "K04",
+  "kode_kelompok": "Rabu-04",
   "topik_pilihan": 2,
   "nama_topik": "",
-  "judul_proyek": "",
+  "judul_proyek": "Model Recognition Bahasa Isyarat BISINDO dengan CNN + LSTM",
   "abstrak_singkat": "",
 
   "metode_ai": [
     {
-      "nama": "",
+      "nama": "LSTM",
       "peran": "utama",
       "varian": "",
-      "catatan": ""
+      "catatan": "Model utama untuk menangkap dependensi temporal dalam data pose tangan yang dihasilkan oleh Mediapipe"
+    },
+    {
+      "nama": "CNN",
+      "peran": "pendukung",
+      "varian": "",
+      "catatan": "Ekstraksi fitur spasial dari data pose tangan yang dihasilkan oleh Mediapipe"
     }
   ],
 
   "frameworks": [
     {
       "nama": "tensorflow",
-      "versi": "",
-      "kegunaan": ""
+      "versi": "2.21.0",
+      "kegunaan": "Training dan Evaluasi Model CNN + LSTM"
+    },
+    {
+      "nama": "mediapipe",
+      "versi": "0.8.10",
+      "kegunaan": "Deteksi pose tangan untuk ekstraksi fitur"
+    },
+    {
+      "nama": "opencv",
+      "versi": "4.5.5",
+      "kegunaan": "Perekaman video dan pemrosesan gambar"
     }
   ],
 
   "datasets": [
     {
-      "nama": "",
-      "tipe": "publik",
+      "nama": "BISINDO numpy Dataset",
+      "tipe": "mandiri",
       "sumber": "",
       "url_sumber_publik": "",
-      "jumlah_sampel": 0,
-      "jumlah_kelas": 0,
-      "proses_akuisisi_mandiri": "",
-      "peran_di_proyek": "",
+      "jumlah_sampel": 600,
+      "jumlah_kelas": 10,
+      "proses_akuisisi_mandiri": "Melakukan perekaman video dengan openCV dan Mediapipe untuk mendeteksi pose tangan, kemudian menyimpan data dalam format numpy.",
+      "peran_di_proyek": "Dataset untuk Training dan Evaluasi Model",
       "spek_rl": null
     }
   ],
 
   "metrik_utama": [],
-  "klaim_bonus": [],
+  "klaim_bonus": ["B1", "B2"],
 
   "anggota": [
     {
-      "nama": "",
-      "npm": "",
+      "nama": "Muhamad Rey Kafaka Fadlan",
+      "npm": "2306250573",
       "peran_utama": "",
       "focus_area": [],
       "konsep_dikuasai_implementasi": [],
@@ -51,8 +67,8 @@
       "bagian_kode": []
     },
     {
-      "nama": "",
-      "npm": "",
+      "nama": "Raddief Ezra Satrio Andaru",
+      "npm": "2306250693",
       "peran_utama": "",
       "focus_area": [],
       "konsep_dikuasai_implementasi": [],
@@ -61,8 +77,18 @@
       "bagian_kode": []
     },
     {
-      "nama": "",
-      "npm": "",
+      "nama": "Muhammad Rafli",
+      "npm": "2306250730",
+      "peran_utama": "",
+      "focus_area": [],
+      "konsep_dikuasai_implementasi": [],
+      "konsep_dikuasai_teori": [],
+      "bagian_laporan": [],
+      "bagian_kode": []
+    },
+    {
+      "nama": "Izzan Nawa Syarif",
+      "npm": "2306266956",
       "peran_utama": "",
       "focus_area": [],
       "konsep_dikuasai_implementasi": [],
@@ -73,16 +99,18 @@
   ],
 
   "tautan": {
-    "github": "",
+    "github": "https://github.com/0TheMagik/Deteksi-Bahasa-Isyarat-BISINDO",
     "colab": "",
     "dataset_mandiri": null,
     "video_demo": null
   },
 
   "ai_assistant_usage": {
-    "digunakan": false,
-    "tools": [],
-    "bagian": [],
+    "digunakan": true,
+    "tools": ["GitHub Copilot"],
+    "bagian": [
+      "Debugging error CUDA"
+    ],
     "estimasi_persentase": 0
   }
 }

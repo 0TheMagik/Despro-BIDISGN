@@ -1,0 +1,22 @@
+[project]
+name = "cnn-lstm-signlanguagemodel"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Your Name",email = "you@example.com"}
+]
+requires-python = ">=3.11"
+dependencies = [
+    "matplotlib (>=3.10.9,<4.0.0)",
+    "mediapipe (>=0.10.35,<0.11.0)",
+    "numpy (>=2.4.6,<3.0.0)",
+    "opencv-contrib-python (>=4.13.0.92,<5.0.0.0)",
+    "opencv-python (>=4.13.0.92,<5.0.0.0)",
+    "scikit-learn (>=1.8.0,<2.0.0)",
+    "tensorflow (>=2.21.0,<3.0.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
