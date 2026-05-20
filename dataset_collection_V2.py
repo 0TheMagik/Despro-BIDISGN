@@ -53,15 +53,29 @@ end_sequence = start_sequence + num_videos_to_collect
 # Video Dimension
 videodimension = (frame_width, frame_height)
 
+# ... (Kode Video capture, codec, start end sequence tetap sama)
+
+# --- 1. SET UP MOUSE CALLBACK SEBELUM LOOP RECORDING ---
+cv2.namedWindow("Frame")
+mouse_state = {"clicked": False}
+
+def mouse_callback(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        mouse_state["clicked"] = True
+
+cv2.setMouseCallback("Frame", mouse_callback)
+# --------------------------------------------------------
+
 # Mulai perulangan berdasarkan jumlah video yang ingin direkam
 for sequence in range(start_sequence, end_sequence):
     filename = os.path.join(action_path, f"{sequence}.mp4")
     out = cv2.VideoWriter(filename, codec, frame_rate, videodimension)
     recording = False
     frames_recorded = 0 # Inisialisasi penghitung frame
+    mouse_state["clicked"] = False # Reset status klik untuk sequence baru
     
     print(f"\n--- Persiapkan diri Anda untuk video urutan: {sequence} ---")
-    print("Tekan 's' untuk mulai merekam, otomatis berhenti setelah 60 frame")
+    print("Klik kiri pada window 'Frame' untuk mulai merekam, otomatis berhenti setelah 60 frame")
     
     while True:
         ret, frame = cap.read()
@@ -84,7 +98,8 @@ for sequence in range(start_sequence, end_sequence):
             cv2.putText(display_frame, f'Recording Seq: {sequence} | Frame: {frames_recorded}/60', (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
-            cv2.putText(display_frame, f'Ready Seq: {sequence} | Press S to Start', (10, 30), 
+            # Ubah teks indikator layar
+            cv2.putText(display_frame, f'Ready Seq: {sequence} | Left Click to Start', (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
         # 4. Tampilkan frame
@@ -92,10 +107,16 @@ for sequence in range(start_sequence, end_sequence):
 
         key = cv2.waitKey(1) & 0xFF
         
-        # Mulai merekam jika 's' ditekan
-        if key == ord('s') and not recording:
+        # --- 2. UBAH LOGIKA TRIGGER ---
+        # Mulai merekam jika window diklik (kiri)
+        if mouse_state["clicked"] and not recording:
             print(f"Mulai merekam {sequence}.mp4...")
             recording = True
+            mouse_state["clicked"] = False # Reset flag klik
+
+        # if key == ord('s') and not recording:
+        #     print(f"Mulai merekam {sequence}.mp4...")
+        #     recording = True 
             
         # Otomatis berhenti merekam jika sudah 60 frame
         if recording and frames_recorded >= num_frames:
