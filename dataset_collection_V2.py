@@ -6,114 +6,109 @@ import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
+## Script untuk merekam Video dataset BISINDO
 
 os.environ["EGL_PLATFORM"] = "surfaceless" # Error Prevention untuk Linux
 
-# Folder dataset
 DATA_PATH = os.path.join('dataset')
-# 60 frames per-video
-video_frames = 60
 
-# Input Label
+num_frames = 60
+
 action_name = input("Masukkan nama aksi/label (contoh: hello) \t: ").strip()
 try:
     num_videos_to_collect = int(input("Jumlah video yang ingin direkam \t\t: "))
 except ValueError:
     print("Input tidak valid, mengatur ke default (1 video).")
     num_videos_to_collect = 1
-
+    
 # Membuat folder/label jika belum ada
 action_path = os.path.join(DATA_PATH, action_name)
 os.makedirs(action_path, exist_ok=True)
 
-existing_videos = [int(f) for f in os.listdir(action_path) if f.isdigit()]
+cap = cv2.VideoCapture(0)
+if (cap.isOpened() == False):
+    print("Error opening video stream or file")
+
+
+frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+frame_rate = int(cap.get(cv2.CAP_PROP_FPS))
+
+print("Frame Width: ", frame_width)
+print("Frame Height: ", frame_height)
+print("Frame Rate: ", frame_rate)
+
+# Video Codec for .MP4
+codec = cv2.VideoWriter_fourcc(*'mp4v')
+
+# Cek file .mp4 yang sudah ada di folder untuk mendapatkan nomor urut terakhir
+existing_videos = [
+    int(f.split('.')[0]) 
+    for f in os.listdir(action_path) 
+    if f.endswith('.mp4') and f.split('.')[0].isdigit()
+]
 start_sequence = max(existing_videos) + 1 if existing_videos else 0
 end_sequence = start_sequence + num_videos_to_collect
 
-print(f"\nSequence dimulai dari folder '{start_sequence}' hingga '{end_sequence - 1}'")
+# Video Dimension
+videodimension = (frame_width, frame_height)
 
+# Mulai perulangan berdasarkan jumlah video yang ingin direkam
 for sequence in range(start_sequence, end_sequence):
-    os.makedirs(os.path.join(action_path, str(sequence)), exist_ok=True)
+    filename = os.path.join(action_path, f"{sequence}.mp4")
+    out = cv2.VideoWriter(filename, codec, frame_rate, videodimension)
+    recording = False
+    frames_recorded = 0 # Inisialisasi penghitung frame
+    
+    print(f"\n--- Persiapkan diri Anda untuk video urutan: {sequence} ---")
+    print("Tekan 's' untuk mulai merekam, otomatis berhenti setelah 60 frame")
+    
+    while True:
+        ret, frame = cap.read()
 
-# 3. Setup MediaPipe
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
+        if ret == False:
+            print("Error retrieving frame")
+            break
 
-options = HandLandmarkerOptions(
-    base_options=BaseOptions(model_asset_path='handlandmarker/hand_landmarker.task',
-                             delegate=BaseOptions.Delegate.GPU),
-    running_mode=VisionRunningMode.VIDEO,
-    num_hands=2) 
+        # 1. Simpan frame ASLI dan hitung
+        if recording:
+            out.write(frame)
+            frames_recorded += 1 # Tambahkan counter
 
-def extract_keypoints(results):
-    if results and getattr(results, "hand_landmarks", None):
-        landmarks_list = []
-        for hand in results.hand_landmarks:
-            for landmark in hand:
-                landmarks_list.extend([landmark.x, landmark.y, landmark.z])
-        # Standarisasi array ke 126 elemen (2 tangan x 21 titik x 3 koordinat XYZ)
-        arr = np.array(landmarks_list)
-        if arr.shape[0] < 126:
-            arr = np.concatenate([arr, np.zeros(126 - arr.shape[0])])
-        return arr[:126]
-    else:
-        return np.zeros(21 * 3 * 2) 
+        # 2. Buat Copy untuk tampilan layar
+        display_frame = frame.copy() 
+        
+        # 3. Menambahkan indikator text & Hitungan Frame di Layar
+        if recording:
+            # Beritahu di layar progres framenya
+            cv2.putText(display_frame, f'Recording Seq: {sequence} | Frame: {frames_recorded}/60', (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        else:
+            cv2.putText(display_frame, f'Ready Seq: {sequence} | Press S to Start', (10, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+        # 4. Tampilkan frame
+        cv2.imshow("Frame", display_frame)
 
-# 4. Pengambilan Video
+        key = cv2.waitKey(1) & 0xFF
+        
+        # Mulai merekam jika 's' ditekan
+        if key == ord('s') and not recording:
+            print(f"Mulai merekam {sequence}.mp4...")
+            recording = True
+            
+        # Otomatis berhenti merekam jika sudah 60 frame
+        if recording and frames_recorded >= num_frames:
+            print(f"Selesai merekam {sequence}.mp4! (60 / 60 frames)")
+            break
+            
+        # Bisa juga berhenti paksa pakai q (opsional)
+        elif key == ord('q'):
+            print(f"Dihentikan paksa (Merekam {frames_recorded} frame)")
+            break
 
-# Mintalah input Enter DULU sebelum menyalakan kamera
-input(f"Tekan Enter untuk mulai merekam {num_videos_to_collect} video untuk '{action_name}'...")
+    out.release() # Tutup akses file untuk video saat ini
 
-# Kamera baru dinyalakan SETELAH Enter ditekan agar tidak terjadi timeout/buffer overflow
-cap = cv2.VideoCapture(0, cv2.CAP_V4L2) # Coba pakai (0) saja tanpa cv2.CAP_V4L2 jika masih ada error
-
-with HandLandmarker.create_from_options(options) as landmarker:
-    if not cap.isOpened():
-        print("Cannot open camera")
-    else:
-        start_time = time.time()  # Waktu mulai untuk timestamp video
-        # Loop sekuens video
-        for sequence in range(start_sequence, end_sequence):
-            for frame_num in range(video_frames):
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    print("Camera/Frame error.")
-                    break
-                
-                # Proses frame dengan MediaPipe
-                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                
-                # Hitung timestamp dalam milidetik (harus terus bertambah)
-                frame_timestamp_ms = int((time.time() - start_time) * 1000)
-                
-                # Gunakan detect_for_video() dan masukkan timestamp-nya
-                results = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
-                keypoints = extract_keypoints(results)
-                
-                # Tampilan UI di layar
-                if frame_num == 0: 
-                    cv2.putText(frame, 'BERSIAP...', (120,200), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255, 0), 4, cv2.LINE_AA)
-                    cv2.putText(frame, f'Collecting [{action_name}] Seq: {sequence}', (15,20), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-                    cv2.imshow('OpenCV Feed', frame)
-                    cv2.waitKey(1000) # Jeda 1 detik sebelum video baru mulai
-                else: 
-                    cv2.putText(frame, f'Collecting [{action_name}] Seq: {sequence}', (15,20), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
-                    cv2.imshow('OpenCV Feed', frame)
-                
-                # Menyimpan Koordinat Landmark ke folder
-                npy_path = os.path.join(action_path, str(sequence), str(frame_num))
-                np.save(npy_path, keypoints)
-
-                if cv2.waitKey(10) & 0xFF == ord('q'):
-                    print("Perekaman dihentikan paksa.")
-                    break
-
-        print("\nPerekaman Selesai!")
-
+print("\nSeluruh video berhasil direkam!")
 cap.release()
 cv2.destroyAllWindows()
