@@ -12,7 +12,7 @@ os.environ["EGL_PLATFORM"] = "surfaceless" # Error Prevention untuk Linux
 
 DATA_PATH = os.path.join('dataset')
 
-num_frames = 60
+num_frames = 90
 
 action_name = input("Masukkan nama aksi/label (contoh: hello) \t: ").strip()
 try:
@@ -25,7 +25,7 @@ except ValueError:
 action_path = os.path.join(DATA_PATH, action_name)
 os.makedirs(action_path, exist_ok=True)
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(1)
 if (cap.isOpened() == False):
     print("Error opening video stream or file")
 
