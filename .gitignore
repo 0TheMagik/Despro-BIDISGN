@@ -9,3 +9,8 @@ __pycache__/
 .ipynb_checkpoints/
 
 ptxas
+
+*.npy
+/Logs/
+/tuner_logs/
+/base_model/

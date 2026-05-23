@@ -49,7 +49,7 @@ def convert_video_to_numpy(video_path: Path, out_path: Path, *, frame_step=1, ma
     options = HandLandmarkerOptions(
         base_options=BaseOptions(
             model_asset_path='handlandmarker/hand_landmarker.task',
-            delegate=BaseOptions.Delegate.CPU,
+            delegate=BaseOptions.Delegate.GPU,
         ),
         running_mode=VisionRunningMode.VIDEO,
         num_hands=2,
@@ -61,7 +61,7 @@ def convert_video_to_numpy(video_path: Path, out_path: Path, *, frame_step=1, ma
 
     fps = cap.get(cv2.CAP_PROP_FPS)
     if not fps or fps <= 0:
-        fps = 30.0
+        fps = 90.0
 
     frames = []
     idx = 0
