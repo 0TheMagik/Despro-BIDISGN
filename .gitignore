@@ -11,6 +11,3 @@ __pycache__/
 ptxas
 
 *.npy
-/Logs/
-/tuner_logs/
-/base_model/
