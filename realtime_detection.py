@@ -106,8 +106,6 @@ threshold = 0.7                          # Confidence Threshold
 predicted_action = "-"
 predicted_confidence = 0.0
 predictions_history = deque(maxlen=5)    # Histori untuk stabilisasi prediksi
-sentence = []                            # Akumulasi kata menjadi kalimat
-MAX_SENTENCE = 8                         # Batas kata yang ditampilkan
 frame_counter = 0
 prediction_thread = None
 pred_lock = threading.Lock()
@@ -143,12 +141,6 @@ def predict_action(input_data):
             stable_pred = current_pred
 
         predicted_action = stable_pred
-
-        # Akumulasi kalimat: tambahkan kata jika stabil & berbeda dari kata sebelumnya
-        if stable_pred != "-" and (len(sentence) == 0 or sentence[-1] != stable_pred):
-            sentence.append(stable_pred)
-            if len(sentence) > MAX_SENTENCE:
-                sentence.pop(0)
 
 
 def put_text_with_bg(img, text, org, font_scale=0.7, color=(255, 255, 255),
@@ -208,7 +200,6 @@ with HandLandmarker.create_from_options(options) as landmarker:
         with pred_lock:
             cur_action = predicted_action
             cur_conf = predicted_confidence
-            cur_sentence = ' '.join(sentence) if sentence else '...'
         cv2.putText(frame, f'Deteksi: {cur_action}  ({cur_conf*100:.1f}%)',
                     (10, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
 
@@ -221,28 +212,15 @@ with HandLandmarker.create_from_options(options) as landmarker:
                       (bar_x + int(bar_w * fill_ratio), 38),
                       (0, 200, 0) if fill_ratio >= 1 else (0, 165, 255), -1)
 
-        # Bar bawah: kalimat hasil akumulasi
-        cv2.rectangle(frame, (0, h - 60), (w, h), (50, 50, 50), -1)
-        put_text_with_bg(frame, f'Kalimat: {cur_sentence}',
-                         (10, h - 22), font_scale=0.8,
-                         color=(255, 255, 255), bg=(50, 50, 50), thickness=2, pad=4)
-
         # Petunjuk tombol
-        cv2.putText(frame, "[Q] Keluar  [C] Hapus kalimat",
-                    (10, h - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+        cv2.putText(frame, "[Q] Keluar",
+                    (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                     (200, 200, 200), 1, cv2.LINE_AA)
 
         cv2.imshow('Deteksi BISINDO Realtime', frame)
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if cv2.waitKey(1) & 0xFF == ord('q'):
             break
-        elif key == ord('c'):
-            with pred_lock:
-                sentence.clear()
-                predictions_history.clear()
-                predicted_action = "-"
-                predicted_confidence = 0.0
 
 cap.release()
 cv2.destroyAllWindows()
