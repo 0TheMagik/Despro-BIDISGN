@@ -1,9 +1,9 @@
 {
   "kode_kelompok": "Rabu-04",
   "topik_pilihan": 2,
-  "nama_topik": "",
+  "nama_topik": "LSTM",
   "judul_proyek": "Model Recognition Bahasa Isyarat BISINDO dengan CNN + LSTM",
-  "abstrak_singkat": "",
+  "abstrak_singkat": "Penelitian ini mengembangkan model pengenalan bahasa isyarat BISINDO berbasis skeleton gerak menggunakan kombinasi Convolutional Neural Network (CNN) dan Long Short-Term Memory (LSTM) dengan ekstraksi titik koordinat melalui MediaPipe Hand Landmarker. Dataset diproses menggunakan sequence limit 90 frame dan augmentasi data berupa noise jittering serta scaling waktu. Pengujian dilakukan pada dua skenario, yaitu Baseline dan CNN-LSTM Proposed dengan Keras Random Search Tuner. Hasil menunjukkan peningkatan performa signifikan setelah hyperparameter tuning. Model Baseline memperoleh Test Score 99,44%, sedangkan model usulan mencapai akurasi sempurna sebesar 100%. Parameter dropout dan unit LSTM berperan penting dalam mencegah overfitting serta mendukung implementasi real-time.",
 
   "metode_ai": [
     {
@@ -42,8 +42,8 @@
     {
       "nama": "BISINDO numpy Dataset",
       "tipe": "mandiri",
-      "sumber": "",
-      "url_sumber_publik": "",
+      "sumber": "https://github.com/0TheMagik/Deteksi-Bahasa-Isyarat-BISINDO/tree/main/dataset",
+      "url_sumber_publik": "https://github.com/0TheMagik/Deteksi-Bahasa-Isyarat-BISINDO/tree/main/dataset",
       "jumlah_sampel": 600,
       "jumlah_kelas": 10,
       "proses_akuisisi_mandiri": "Melakukan perekaman video dengan openCV dan Mediapipe untuk mendeteksi pose tangan, kemudian menyimpan data dalam format numpy.",
@@ -52,57 +52,67 @@
     }
   ],
 
+
   "metrik_utama": [],
-  "klaim_bonus": ["B1", "B2"],
+  "klaim_bonus": ["B1", "B2", "B3"],
 
   "anggota": [
     {
       "nama": "Muhamad Rey Kafaka Fadlan",
       "npm": "2306250573",
-      "peran_utama": "",
-      "focus_area": [],
-      "konsep_dikuasai_implementasi": [],
-      "konsep_dikuasai_teori": [],
-      "bagian_laporan": [],
+      "peran_utama": "Pembuatan Laporan",
+      "focus_area": ["pembuat laporan", "membuat dan mengumpulkan dataset mandiri"],
+      "konsep_dikuasai_implementasi": ["Pemrosesan video real-time dengan OpenCV"],
+      "konsep_dikuasai_teori": ["confusion matrix", "underfitting dan overfitting"],
+      "bagian_laporan": ["Bab II.3, Bab III.6, bab III.7"],
       "bagian_kode": []
     },
     {
       "nama": "Raddief Ezra Satrio Andaru",
       "npm": "2306250693",
-      "peran_utama": "",
-      "focus_area": [],
-      "konsep_dikuasai_implementasi": [],
-      "konsep_dikuasai_teori": [],
-      "bagian_laporan": [],
-      "bagian_kode": []
+      "peran_utama": "konversi video mp4 ke numpy",
+      "focus_area": ["pembuatan kode video_to_numpy.py", "pembuat laporan", "membuat dan mengumpulkan dataset mandiri"],
+      "konsep_dikuasai_implementasi": ["Pemrosesan video real-time dengan OpenCV"],
+      "konsep_dikuasai_teori": ["confusion matrix",
+    "underfitting dan overfitting"],
+      "bagian_laporan": ["Bab I.3 Bab II.2 (perhitungan matematis), Bab II.4, Bab II.5, Bab V.1"],
+      "bagian_kode": ["video_to_numpy.py"]
     },
+
     {
       "nama": "Muhammad Rafli",
       "npm": "2306250730",
-      "peran_utama": "",
-      "focus_area": [],
-      "konsep_dikuasai_implementasi": [],
-      "konsep_dikuasai_teori": [],
-      "bagian_laporan": [],
-      "bagian_kode": []
+      "peran_utama": "Demonstrasi Application",
+      "focus_area": [
+        "pembuatan kode demontrasi realtime",
+        "pembuatan laporan",
+        "membuat dan mengumpulkan dataset mandiri"
+      ],
+      "konsep_dikuasai_implementasi": ["Pemrosesan video real-time dengan OpenCV"],
+      "konsep_dikuasai_teori": [
+        "f1-score",
+        "confusion matrix",
+        "underfitting dan overfitting"],
+      "bagian_laporan": ["Bab I.2 Bab III.1, Bab III.2, Bab III.3, Bab III.4,"],
+      "bagian_kode": ["realtime_detection.py"]
     },
     {
       "nama": "Izzan Nawa Syarif",
       "npm": "2306266956",
-      "peran_utama": "",
-      "focus_area": [],
-      "konsep_dikuasai_implementasi": [],
-      "konsep_dikuasai_teori": [],
-      "bagian_laporan": [],
-      "bagian_kode": []
+      "peran_utama": "Eksekutor Training dan Pembuat Arsitektur",
+      "focus_area": ["Model Training"],
+      "konsep_dikuasai_implementasi": ["Tensorflow keras", "Mediapipe Handlandmarker"],
+      "konsep_dikuasai_teori": ["LSTM", "Dropout", "Dense Layer"],
+      "bagian_laporan": ["Grafik Arsitektur Bab II, ", "QC (Bab III.2, Bab III.3, Bab III.4)"],
+      "bagian_kode": ["Kode dataset Collection, Kode CNN_LSTM_independent_dataset"]
     }
   ],
 
   "tautan": {
     "github": "https://github.com/0TheMagik/Deteksi-Bahasa-Isyarat-BISINDO",
     "colab": "",
-    "dataset_mandiri": null,
-    "video_demo": null
+    "dataset_mandiri": "https://github.com/0TheMagik/Deteksi-Bahasa-Isyarat-BISINDO/tree/main/dataset",
+    "video_demo": "https://youtu.be/QW3jGyhZW6I"
   },
 
   "ai_assistant_usage": {
