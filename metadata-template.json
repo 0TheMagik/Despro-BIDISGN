@@ -9,13 +9,13 @@
     {
       "nama": "LSTM",
       "peran": "utama",
-      "varian": "",
+      "varian": "Stacked LSTM",
       "catatan": "Model utama untuk menangkap dependensi temporal dalam data pose tangan yang dihasilkan oleh Mediapipe"
     },
     {
       "nama": "CNN",
       "peran": "pendukung",
-      "varian": "",
+      "varian": "Conv1D",
       "catatan": "Ekstraksi fitur spasial dari data pose tangan yang dihasilkan oleh Mediapipe"
     }
   ],
