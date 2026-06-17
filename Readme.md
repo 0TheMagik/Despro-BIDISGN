@@ -40,18 +40,3 @@ Arsitektur yang kami gunakan :
 graph TD
 A[Conv1D] --> B[Maxpooling \nPool_size = 2] --> C[Dropout] --> D[Conv1D] --> E[Maxpooling \nPool_size = 2] --> F[Dropout] --> G[LSTM] --> H[Dropout] --> I[LSTM] --> J[Dropout] --> K[LSTM] --> L[Dropout] --> M[Dense] --> N[Dropout] --> O[Dense] --> P[Dense Output]
 ```
-
-## Base Model 
-Base model yang dibuat pada dataset ini memiliki parameter dan Hyperparameter sebagai berikut:
-
-hasil dari model ini kami analisis dan menghasilkan Metric berikut:
-
-## Hyperparameter Tuning
-Hyperparameter tuning kami lakukan dengan menggunakan random search berjumlah `Isi Jumlah` dan men-tuning Hyperparameter `ISI`
-
-hasil terbaik pada Hyperparameter Tuning kemudian di analisis dan menghasilkan Metric berikut:
-
-
-## Kesimpulan
-
-## Kendala Selama Pengerjaan
