@@ -12,7 +12,7 @@ Usage examples:
 This script depends on:
   pip install opencv-python numpy mediapipe
   
-usage: 
+usage (windows powershell): 
 Get-ChildItem -Path .\dataset -Recurse -File |
 Where-Object { $_.Extension -in '.mp4'} |
 ForEach-Object {
@@ -23,6 +23,18 @@ ForEach-Object {
         --min-hand-presence-confidence 0.2 `
         --min-tracking-confidence 0.2
 }
+
+linux/mac usage:
+find ./dataset -type f -iname '*.mp4' -print0 |
+while IFS= read -r -d '' video; do
+    python ./video_to_numpy.py \
+        --input "$video" \
+        --output-dir "$(dirname "$video")" \
+        --min-hand-detection-confidence 0.2 \
+        --min-hand-presence-confidence 0.2 \
+        --min-tracking-confidence 0.2
+done
+
 """
 from pathlib import Path
 import argparse
@@ -149,7 +161,7 @@ def main(argv=sys.argv[1:]):
     group.add_argument('--input-dir', type=Path, help='Directory to scan for video files')
     parser.add_argument('--output-dir', '-o', type=Path, required=True, help='Directory to write NumPy outputs')
     parser.add_argument('--frame-step', type=int, default=1, help='Take one frame every N frames (default 1 = all)')
-    parser.add_argument('--max-frames', type=int, default=60, help='Stop after saving this many frames (default: 60)')
+    parser.add_argument('--max-frames', type=int, default=90, help='Stop after saving this many frames (default: 90)')
     parser.add_argument('--normalize', action='store_true', help='Kept for compatibility; keypoints are already coordinates')
     parser.add_argument('--prefix', type=str, default='', help='Optional prefix for output filenames')
     parser.add_argument('--min-hand-detection-confidence', type=float, default=0.5, help='Hand detection threshold (0.2-0.5, default: 0.5)')
