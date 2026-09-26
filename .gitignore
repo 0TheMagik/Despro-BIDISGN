@@ -11,3 +11,4 @@ __pycache__/
 ptxas
 
 *.npy
+*.mp4
