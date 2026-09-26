@@ -11,6 +11,18 @@ Usage examples:
 
 This script depends on:
   pip install opencv-python numpy mediapipe
+  
+usage: 
+Get-ChildItem -Path .\dataset -Recurse -File |
+Where-Object { $_.Extension -in '.mp4'} |
+ForEach-Object {
+    python .\video_to_numpy.py `
+        --input $_.FullName `
+        --output-dir $_.DirectoryName `
+        --min-hand-detection-confidence 0.2 `
+        --min-hand-presence-confidence 0.2 `
+        --min-tracking-confidence 0.2
+}
 """
 from pathlib import Path
 import argparse
@@ -45,7 +57,25 @@ def extract_keypoints(results):
     return np.zeros(126, dtype=np.float32)
 
 
-def convert_video_to_numpy(video_path: Path, out_path: Path, *, frame_step=1, max_frames=60, normalize=False):
+def convert_video_to_numpy(
+    video_path: Path,
+    out_path: Path,
+    *,
+    frame_step=1,
+    max_frames=60,
+    normalize=False,
+    min_hand_detection_confidence=0.5,
+    min_hand_presence_confidence=0.5,
+    min_tracking_confidence=0.5,
+):
+    thresholds = (
+        min_hand_detection_confidence,
+        min_hand_presence_confidence,
+        min_tracking_confidence,
+    )
+    if any(not 0.2 <= threshold <= 0.5 for threshold in thresholds):
+        raise ValueError('HandLandmarker thresholds must be between 0.2 and 0.5')
+
     options = HandLandmarkerOptions(
         base_options=BaseOptions(
             model_asset_path='handlandmarker/hand_landmarker.task',
@@ -53,6 +83,9 @@ def convert_video_to_numpy(video_path: Path, out_path: Path, *, frame_step=1, ma
         ),
         running_mode=VisionRunningMode.VIDEO,
         num_hands=2,
+        min_hand_detection_confidence=min_hand_detection_confidence,
+        min_hand_presence_confidence=min_hand_presence_confidence,
+        min_tracking_confidence=min_tracking_confidence,
     )
 
     cap = cv2.VideoCapture(str(video_path))
@@ -119,6 +152,9 @@ def main(argv=sys.argv[1:]):
     parser.add_argument('--max-frames', type=int, default=60, help='Stop after saving this many frames (default: 60)')
     parser.add_argument('--normalize', action='store_true', help='Kept for compatibility; keypoints are already coordinates')
     parser.add_argument('--prefix', type=str, default='', help='Optional prefix for output filenames')
+    parser.add_argument('--min-hand-detection-confidence', type=float, default=0.5, help='Hand detection threshold (0.2-0.5, default: 0.5)')
+    parser.add_argument('--min-hand-presence-confidence', type=float, default=0.5, help='Hand presence threshold (0.2-0.5, default: 0.5)')
+    parser.add_argument('--min-tracking-confidence', type=float, default=0.5, help='Hand tracking threshold (0.2-0.5, default: 0.5)')
 
     args = parser.parse_args(argv)
 
@@ -135,7 +171,16 @@ def main(argv=sys.argv[1:]):
         try:
             name = args.prefix + v.stem
             out_file = output_dir / name
-            saved = convert_video_to_numpy(v, out_file, frame_step=args.frame_step, max_frames=args.max_frames, normalize=args.normalize)
+            saved = convert_video_to_numpy(
+                v,
+                out_file,
+                frame_step=args.frame_step,
+                max_frames=args.max_frames,
+                normalize=args.normalize,
+                min_hand_detection_confidence=args.min_hand_detection_confidence,
+                min_hand_presence_confidence=args.min_hand_presence_confidence,
+                min_tracking_confidence=args.min_tracking_confidence,
+            )
             print(f'Saved {saved} (from {v})')
         except Exception as e:
             print(f'Error processing {v}: {e}', file=sys.stderr)
