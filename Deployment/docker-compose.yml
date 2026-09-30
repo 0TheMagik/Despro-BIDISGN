@@ -1,0 +1,14 @@
+services:
+  handlandmarker:
+    build:
+      context: ..
+      dockerfile: Deployment/handlandmarker/Dockerfile
+    ports:
+      - "8001:8080"
+
+  model:
+    build:
+      context: ..
+      dockerfile: Deployment/model/Dockerfile
+    ports:
+      - "8002:8080"
