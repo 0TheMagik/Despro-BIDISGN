@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import os
-import tempfile
 import threading
+import time
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -46,14 +48,70 @@ pred_lock = threading.Lock()
 prediction_thread = None
 frame_counter = 0
 
+session_id = str(uuid.uuid4())
 
-def call_handlandmarker(video_path: Path) -> list[list[float]]:
-    with video_path.open("rb") as video_file:
-        response = requests.post(
-            f"{HANDLANDMARKER_URL.rstrip('/')}/extract",
-            files={"file": (video_path.name, video_file, "video/mp4")},
-            timeout=180,
-        )
+
+def put_text_with_bg(img, text, org, font_scale=0.7, color=(255, 255, 255),
+                     bg=(0, 0, 0), thickness=2, pad=6):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+    x, y = org
+    cv2.rectangle(img, (x - pad, y - th - pad), (x + tw + pad, y + baseline + pad), bg, -1)
+    cv2.putText(img, text, (x, y), font, font_scale, color, thickness, cv2.LINE_AA)
+
+
+HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20),
+    (0, 17)
+]
+
+
+def draw_hand_landmarks(image, keypoints, width, height, mirror=False):
+    """Draw landmark points and connections on the image.
+
+    keypoints: list of 126 floats (63 landmarks x,y,z) or list of two hands (63 each).
+    mirror: flip x coordinates for display with cv2.flip.
+    """
+    if not keypoints or len(keypoints) < 126:
+        return
+
+    points = []
+    for i in range(0, 126, 3):
+        x, y, z = keypoints[i], keypoints[i + 1], keypoints[i + 2]
+        if mirror:
+            x = 1.0 - x
+        px, py = int(x * width), int(y * height)
+        points.append((px, py))
+
+    for a, b in HAND_CONNECTIONS:
+        if a < len(points) and b < len(points):
+            cv2.line(image, points[a], points[b], (0, 255, 0), 2)
+
+    for (x, y) in points:
+        cv2.circle(image, (x, y), 4, (0, 0, 255), -1)
+        cv2.circle(image, (x, y), 6, (255, 255, 255), 1)
+
+
+def call_handlandmarker_frame(frame: np.ndarray, timestamp_ms: int) -> list[float]:
+    """Send a single frame to the handlandmarker session and get keypoints."""
+    _, buffer = cv2.imencode(".jpg", frame)
+    frame_b64 = base64.b64encode(buffer).decode("utf-8")
+
+    response = requests.post(
+        f"{HANDLANDMARKER_URL.rstrip('/')}/session/frame",
+        json={
+            "session_id": session_id,
+            "frame_data": frame_b64,
+            "timestamp_ms": timestamp_ms,
+            "width": frame.shape[1],
+            "height": frame.shape[0],
+        },
+        timeout=30,
+    )
     response.raise_for_status()
     payload = response.json()
     return payload.get("keypoints", [])
@@ -71,12 +129,11 @@ def call_model(keypoints: list[list[float]]) -> tuple[str, float]:
     return str(prediction["label"]), float(prediction["confidence"])
 
 
-def predict_from_clip(video_path: Path):
+def predict_action(keypoints: list[list[float]]):
     global predicted_action, predicted_confidence
 
     try:
-        keypoints = call_handlandmarker(video_path)
-        if not keypoints:
+        if not keypoints or len(keypoints) < SEQ_LEN:
             current_pred = "-"
             confidence = 0.0
         else:
@@ -99,41 +156,48 @@ def predict_from_clip(video_path: Path):
         with pred_lock:
             predicted_action = "-"
             predicted_confidence = 0.0
-    finally:
-        video_path.unlink(missing_ok=True)
 
 
-def write_clip(sequence: deque[np.ndarray], frame_size: tuple[int, int], fps: float) -> Path:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tmp_path = Path(tmp.name)
-    tmp.close()
+def start_session():
+    response = requests.post(
+        f"{HANDLANDMARKER_URL.rstrip('/')}/session/start",
+        json={"session_id": session_id},
+        timeout=30,
+    )
+    response.raise_for_status()
+    print(f"Handlandmarker session started: {session_id}")
 
-    codec = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(tmp_path), codec, fps, frame_size)
+
+def end_session():
     try:
-        for frame in sequence:
-            writer.write(frame)
-    finally:
-        writer.release()
-
-    return tmp_path
+        requests.post(
+            f"{HANDLANDMARKER_URL.rstrip('/')}/session/end",
+            json={"session_id": session_id},
+            timeout=10,
+        )
+        print("Handlandmarker session closed.")
+    except Exception as e:
+        print(f"Warning: failed to close session: {e}")
 
 
 def main():
     global frame_counter, prediction_thread
 
+    print("Memulai koneksi ke Docker services...")
+    print(f"  Handlandmarker: {HANDLANDMARKER_URL}")
+    print(f"  Model:          {MODEL_URL}")
+
+    start_session()
+
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
+        print("Kamera indeks 0 tidak tersedia, mencoba indeks 1...")
         cap = cv2.VideoCapture(1)
 
     if not cap.isOpened():
         raise RuntimeError("Kamera tidak bisa dibuka")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if not fps or fps <= 0:
-        fps = 30.0
-
-    sequence = deque(maxlen=SEQ_LEN)
+    sequence: deque[list[float]] = deque(maxlen=SEQ_LEN)
 
     try:
         while cap.isOpened():
@@ -141,30 +205,40 @@ def main():
             if not ret:
                 break
 
-            frame = cv2.flip(frame, 1)
-            sequence.append(frame.copy())
+            h, w = frame.shape[:2]
+
+            timestamp_ms = int(time.time() * 1000)
+
+            try:
+                keypoints = call_handlandmarker_frame(frame, timestamp_ms)
+            except requests.exceptions.RequestException as e:
+                print(f"[WARNING] Gagal mengirim frame ke handlandmarker: {e}")
+                keypoints = []
+
+            sequence.append(keypoints)
             frame_counter += 1
 
             if len(sequence) == SEQ_LEN and frame_counter % PREDICT_EVERY_N_FRAMES == 0:
-                frame_size = (frame.shape[1], frame.shape[0])
-                clip_path = write_clip(sequence, frame_size, fps)
-
                 if prediction_thread is None or not prediction_thread.is_alive():
                     prediction_thread = threading.Thread(
-                        target=lambda path=clip_path: predict_from_clip(path),
+                        target=predict_action,
+                        args=(list(sequence),),
                         daemon=True,
                     )
                     prediction_thread.start()
-                else:
-                    clip_path.unlink(missing_ok=True)
+
+            # Tampilkan landmark di frame (mirror untuk display natural)
+            display_frame = cv2.flip(frame, 1)
+            if len(sequence) > 0 and len(sequence[-1]) >= 126:
+                draw_hand_landmarks(display_frame, sequence[-1], w, h, mirror=True)
 
             with pred_lock:
                 cur_action = predicted_action
                 cur_conf = predicted_confidence
 
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], 50), (245, 117, 16), -1)
+            cv2.rectangle(display_frame, (0, 0), (w, 50), (245, 117, 16), -1)
             cv2.putText(
-                frame,
+                display_frame,
                 f"Deteksi: {cur_action}  ({cur_conf * 100:.1f}%)",
                 (10, 33),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -176,10 +250,10 @@ def main():
 
             fill_ratio = len(sequence) / SEQ_LEN
             bar_w = 200
-            bar_x = frame.shape[1] - bar_w - 10
-            cv2.rectangle(frame, (bar_x, 12), (bar_x + bar_w, 38), (255, 255, 255), 1)
+            bar_x = w - bar_w - 10
+            cv2.rectangle(display_frame, (bar_x, 12), (bar_x + bar_w, 38), (255, 255, 255), 1)
             cv2.rectangle(
-                frame,
+                display_frame,
                 (bar_x, 12),
                 (bar_x + int(bar_w * fill_ratio), 38),
                 (0, 200, 0) if fill_ratio >= 1 else (0, 165, 255),
@@ -187,9 +261,9 @@ def main():
             )
 
             cv2.putText(
-                frame,
+                display_frame,
                 "[Q] Keluar",
-                (10, frame.shape[0] - 15),
+                (10, h - 15),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (200, 200, 200),
@@ -197,13 +271,14 @@ def main():
                 cv2.LINE_AA,
             )
 
-            cv2.imshow("Deteksi BISINDO via Docker Endpoint", frame)
+            cv2.imshow("Deteksi BISINDO via Docker", display_frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
         cap.release()
         cv2.destroyAllWindows()
+        end_session()
 
 
 if __name__ == "__main__":
