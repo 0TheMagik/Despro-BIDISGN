@@ -24,9 +24,9 @@ if load_dotenv is not None:
 
 HANDLANDMARKER_URL = os.getenv("HANDLANDMARKER_URL", "http://localhost:8001")
 MODEL_URL = os.getenv("MODEL_URL", "http://localhost:8002")
-SEQ_LEN = int(os.getenv("SEQ_LEN", "90"))
-PREDICT_EVERY_N_FRAMES = int(os.getenv("PREDICT_EVERY_N_FRAMES", "5"))
-threshold = float(os.getenv("PREDICTION_THRESHOLD", "0.7"))
+SEQ_LEN = int(os.getenv("SEQ_LEN", "45"))  # Dikurangi dari 90 untuk respons lebih cepat
+PREDICT_EVERY_N_FRAMES = int(os.getenv("PREDICT_EVERY_N_FRAMES", "1"))  # Prediksi setiap frame
+threshold = float(os.getenv("PREDICTION_THRESHOLD", "0.5"))  # Diturunkan agar lebih responsif
 
 actions = np.array([
     "Kita",
@@ -43,7 +43,7 @@ actions = np.array([
 
 predicted_action = "-"
 predicted_confidence = 0.0
-predictions_history = deque(maxlen=5)
+predictions_history = deque(maxlen=3)  # Dikurangi dari 5 agar voting lebih cepat
 pred_lock = threading.Lock()
 prediction_thread = None
 frame_counter = 0
@@ -145,11 +145,17 @@ def predict_action(keypoints: list[list[float]]):
             predictions_history.append(current_pred)
             predicted_confidence = confidence
 
-            if len(predictions_history) == predictions_history.maxlen:
-                counts: dict[str, int] = {}
-                for prediction in predictions_history:
-                    counts[prediction] = counts.get(prediction, 0) + 1
-                predicted_action = max(counts, key=counts.get)
+            # Cek cepat: jika kata sama muncul 2x berturut-turut, langsung tampilkan
+            if len(predictions_history) >= 2:
+                if predictions_history[-1] == predictions_history[-2] and predictions_history[-1] != "-":
+                    predicted_action = predictions_history[-1]
+                elif len(predictions_history) == predictions_history.maxlen:
+                    counts: dict[str, int] = {}
+                    for prediction in predictions_history:
+                        counts[prediction] = counts.get(prediction, 0) + 1
+                    predicted_action = max(counts, key=counts.get)
+                else:
+                    predicted_action = current_pred
             else:
                 predicted_action = current_pred
     except Exception:
