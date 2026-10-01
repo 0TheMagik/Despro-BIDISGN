@@ -12,3 +12,4 @@ ptxas
 
 *.npy
 *.mp4
+.claude/
