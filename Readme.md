@@ -40,3 +40,20 @@ Arsitektur yang kami gunakan :
 graph TD
 A[Conv1D] --> B[Maxpooling \nPool_size = 2] --> C[Dropout] --> D[Conv1D] --> E[Maxpooling \nPool_size = 2] --> F[Dropout] --> G[LSTM] --> H[Dropout] --> I[LSTM] --> J[Dropout] --> K[LSTM] --> L[Dropout] --> M[Dense] --> N[Dropout] --> O[Dense] --> P[Dense Output]
 ```
+
+## Speech-to-text prototype
+
+The second smartglasses prototype listens to speech through the computer's
+default microphone and prints the recognized text. It currently uses the
+Google speech recognition service, so it needs an internet connection.
+
+Install the dependencies and run:
+
+```bash
+python -m pip install -r requirements-speech.txt
+python speech_to_text.py
+```
+
+The default language is Indonesian (`id-ID`). Use `--language en-US` for
+English, or save recognized phrases with `--output transcript.txt`. If the
+wrong microphone is selected, pass its device number with `--device-index`.
