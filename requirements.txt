@@ -3,9 +3,8 @@ mediapipe==0.10.35
 numpy==2.4.4
 opencv_contrib_python==4.13.0.92
 opencv_python==4.13.0.92
+python-dotenv==1.1.1
 scikit_learn==1.8.0
 torch>=2.0.0,<3.0.0
 torchvision>=0.15.0,<1.0.0
 tensorflow==2.21.0
-SpeechRecognition==3.14.3
-PyAudio==0.2.14

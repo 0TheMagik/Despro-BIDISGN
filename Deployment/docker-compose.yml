@@ -1,0 +1,47 @@
+services:
+  handlandmarker:
+    build:
+      context: ..
+      dockerfile: Deployment/handlandmarker/Dockerfile
+    ports:
+      - "8001:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "1.0"
+          memory: 1G
+
+  model:
+    build:
+      context: ..
+      dockerfile: Deployment/model/Dockerfile
+    ports:
+      - "8002:8080"
+    restart: unless-stopped
+    depends_on:
+      handlandmarker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
