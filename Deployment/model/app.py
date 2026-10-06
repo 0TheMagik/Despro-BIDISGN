@@ -26,7 +26,7 @@ LABELS = np.array([
     "Apa",
 ])
 
-MODEL_PATH = Path(os.getenv("MODEL_PATH", "/app/model/model_cnn_lstm_isyarat.keras"))
+MODEL_PATH = Path(os.getenv("MODEL_PATH", "/app/model/deployment_model/model_cnn_lstm_isyarat.keras"))
 model = None
 TARGET_FRAMES = 90
 TARGET_FEATURES = 126
