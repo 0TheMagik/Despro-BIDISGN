@@ -12,11 +12,13 @@ RUN apt-get update \
 
 RUN mkdir -p /app/model
 
-COPY Deployment/model/requirements.txt requirements.txt
+# Path relatif terhadap folder Deployment/model
+COPY requirements.txt requirements.txt
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
-COPY best_model/model_cnn_lstm_isyarat.keras /app/model/model_cnn_lstm_isyarat.keras
-COPY Deployment/model/app.py app.py
+# Pastikan file model sudah berada di Deployment/model/
+COPY model_cnn_lstm_isyarat.keras /app/model/deployment_model/model_cnn_lstm_isyarat.keras
+COPY app.py .
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
