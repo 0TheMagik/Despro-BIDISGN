@@ -18,7 +18,7 @@ RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
 # Pastikan file model sudah berada di Deployment/model/
-COPY model_cnn_lstm_isyarat.keras /app/model/deployment_model/model_cnn_lstm_isyarat.keras
+COPY deployment_model/model_cnn_lstm_isyarat.keras /app/model/deployment_model/model_cnn_lstm_isyarat.keras
 COPY app.py .
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
