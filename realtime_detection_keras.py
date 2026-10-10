@@ -2,147 +2,42 @@ import cv2
 import numpy as np
 import os
 
-# Paksa eksekusi di CPU dengan menonaktifkan GPU CUDA Visibility
+# Paksa eksekusi di CPU dengan menonaktifkan GPU CUDA Visbility
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import mediapipe as mp
-import torch
-import torch.nn as nn
+import tensorflow as tf
+from tensorflow.keras.models import load_model
 from collections import deque
 import threading
 import time
 
-# Setup PyTorch CPU
-device = torch.device("cpu")
-print("Menjalankan model PyTorch menggunakan CPU.")
+# Setup TensorFlow CPU
+print("Menjalankan model menggunakan CPU.")
 
-# 1. Setup Class Labels berdasarkan folder dataset (48 classes dari training)
-# Di-load dari model checkpoint, default fallback berikut sebagai cadangan
-DEFAULT_ACTIONS = np.array([
-    'A', 'Aku', 'Anda', 'Apa', 'B', 'Baik', 'Berapa', 'Bodoh', 'C', 'D',
-    'Darimana', 'Dimana', 'E', 'F', 'G', 'H', 'Hallo', 'I', 'J', 'K',
-    'Kalian', 'Kamu', 'Kemana', 'Kenapa', 'Kita', 'L', 'M', 'N', 'Nunggu',
-    'O', 'P', 'Pintar', 'Q', 'R', 'S', 'Saya', 'Semua', 'Siapa', 'Sombong',
-    'Sudah', 'T', 'Terima Kasih', 'U', 'V', 'W', 'X', 'Y', 'Z'
-])
+# 1. Setup Class Labels berdasarkan folder dataset
+# PENTING: Urutan ini HARUS sama persis dengan urutan label saat training di notebook Linux!
+# Jika menggunakan os.listdir() di Windows urutannya akan abjad (salah).
+actions = np.array(['Kita', 'Kamu', 'Siapa', 'Nunggu', 'Saya', 'Sudah', 'Hallo', 'Dimana', 'Terima Kasih', 'Apa'])
 
-# 2. Definisikan Arsitektur CNN + LSTM (sama dengan training)
-FEATURES = 126
-VIDEO_FRAMES = 90
-
-
-def normalize_sequence(sequence):
-    """Normalisasi landmark tangan - SAM dengan preprocessing training notebook."""
-    # sequence shape: (126,) per frame, kita treat sebagai single frame
-    # Normalisasi per-frame: reshape ke (2, 21, 3) [2 tangan, 21 landmarks, 3 koordinat]
-    normalized = sequence.reshape(2, 21, 3).copy()
-
-    for hand_index in range(2):
-        hand = normalized[hand_index]
-        # Cek apakah landmark valid (tidak nol)
-        valid = np.abs(hand).sum() > 0
-        if not valid:
-            continue
-
-        # Kurangi dengan wrist (landmark 0)
-        wrist = hand[0:1, :].copy()
-        hand -= wrist
-
-        # Scale normalization
-        scale = np.linalg.norm(hand, axis=1).max()
-        if scale > 1e-6:
-            hand /= scale
-
-        normalized[hand_index] = hand
-
-    return normalized.reshape(-1)
-
-
-class CNNLSTM(nn.Module):
-    def __init__(
-        self,
-        num_classes,
-        filters_1=64,
-        filters_2=64,
-        lstm_1=64,
-        lstm_2=64,
-        lstm_3=64,
-        dense_1=64,
-        dense_2=32,
-        dropout=0.2,
-    ):
-        super().__init__()
-        self.cnn = nn.Sequential(
-            nn.Conv1d(FEATURES, filters_1, kernel_size=3, padding="same"),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Dropout(dropout),
-            nn.Conv1d(filters_1, filters_2, kernel_size=3, padding="same"),
-            nn.ReLU(),
-            nn.MaxPool1d(2),
-            nn.Dropout(dropout),
-        )
-        self.lstm = nn.LSTM(filters_2, lstm_1, batch_first=True)
-        self.lstm_2 = nn.LSTM(lstm_1, lstm_2, batch_first=True)
-        self.lstm_3 = nn.LSTM(lstm_2, lstm_3, batch_first=True)
-        self.temporal_dropout = nn.Dropout(dropout)
-        self.classifier = nn.Sequential(
-            nn.Linear(lstm_3, dense_1),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(dense_1, dense_2),
-            nn.ReLU(),
-            nn.Linear(dense_2, num_classes),
-        )
-
-    def forward(self, inputs):
-        features = self.cnn(inputs.transpose(1, 2)).transpose(1, 2)
-        features, _ = self.lstm(features)
-        features = self.temporal_dropout(torch.relu(features))
-        features, _ = self.lstm_2(features)
-        features = self.temporal_dropout(torch.relu(features))
-        features, _ = self.lstm_3(features)
-        features = self.temporal_dropout(torch.relu(features))
-        return self.classifier(features[:, -1])
-
-
-# 3. Muat Model PyTorch
-MODEL_DIR = os.path.join('Prototipe kode versi pytorch', 'best_model')
-MODEL_PATH = os.path.join(MODEL_DIR, 'model_cnn_lstm_isyarat.pt')
-
+# 2. Muat Model Terbaik
+MODEL_PATH = os.path.join('Prototipe code keras', 'best_model', 'model_cnn_lstm_isyarat.keras')
 if not os.path.exists(MODEL_PATH):
-    print(f"Model tidak ditemukan di {MODEL_PATH}, mencoba base_model...")
-    MODEL_DIR = os.path.join('Prototipe kode versi pytorch', 'base_model')
-    MODEL_PATH = os.path.join(MODEL_DIR, 'model_cnn_lstm_isyarat.pt')
+    print(f"Model tidak ditemukan di {MODEL_PATH}. Mencari di base_model...")
+    MODEL_PATH = os.path.join('Prototipe code keras', 'base_model', 'model_cnn_lstm_isyarat.keras')
 
-checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=False)
-model_config = checkpoint.get("model_config", {})
-saved_actions = checkpoint.get("actions", None)
-
-if saved_actions is not None:
-    actions = np.array(saved_actions)
-    print(f"Actions dimuat dari model: {actions}")
-else:
-    actions = DEFAULT_ACTIONS
-    print(f"Actions default digunakan: {actions}")
-
-num_classes = len(actions)
-print(f"Jumlah kelas: {num_classes}")
-
-model = CNNLSTM(num_classes=num_classes, **model_config).to(device)
-model.load_state_dict(checkpoint["model_state_dict"])
-model.eval()
-print("Model PyTorch berhasil dimuat!")
+model = load_model(MODEL_PATH)
+print("Model berhasil dimuat!")
 print("Daftar actions:", actions)
 
-# 4. Konfigurasi Mediapipe HandLandmarker
+# 3. Konfigurasi Mediapipe HandLandmarker
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-hand_detection_confidence = 0.3
-hand_presence_confidence = 0.3
+hand_detection_confidence = 0.5
+hand_presence_confidence = 0.5
 
 options = HandLandmarkerOptions(
     base_options=BaseOptions(
@@ -152,7 +47,7 @@ options = HandLandmarkerOptions(
     num_hands=2,
     min_hand_detection_confidence=hand_detection_confidence,
     min_hand_presence_confidence=hand_presence_confidence,
-    min_tracking_confidence=0.3
+    min_tracking_confidence=0.5
 )
 
 # Koneksi antar landmark tangan untuk visualisasi skeleton tangan
@@ -189,38 +84,25 @@ def draw_hand_landmarks(image, results, mirror=False):
             cv2.circle(image, (x, y), 6, (255, 255, 255), 1)
 
 
-# 5. Fungsi Ekstraksi Keypoint (Sesuai dengan saat training/preprocessing)
-last_valid_keypoints = None  # Simpan frame terakhir yang valid untuk fallback saat tracking hilang
-
+# 4. Fungsi Ekstraksi Keypoint (Sesuai dengan saat training/preprocessing)
 def extract_keypoints(results):
-    global last_valid_keypoints
-
     if results and getattr(results, "hand_landmarks", None):
         landmarks_list = []
-        for hand in results.hand_landmarks[:2]:  # Max 2 hands
+        for hand in results.hand_landmarks[:2]: # Max 2 hands
             for landmark in hand:
                 landmarks_list.extend([landmark.x, landmark.y, landmark.z])
 
         arr = np.array(landmarks_list, dtype=np.float32)
-
         # Pad with zeros if less than 126 (e.g. only 1 hand detected)
         if arr.shape[0] < 126:
             arr = np.concatenate([arr, np.zeros(126 - arr.shape[0], dtype=np.float32)])
-
-        # Terapkan normalisasi yang sama dengan preprocessing training
-        arr = normalize_sequence(arr[:126])
-        last_valid_keypoints = arr  # Simpan sebagai fallback
-        return arr
-
-    # Jika tracking hilang, pakai frame terakhir yang valid (smooth interpolation)
-    if last_valid_keypoints is not None:
-        return last_valid_keypoints
+        return arr[:126]
     return np.zeros(126, dtype=np.float32)
 
-# 6. Program Utama Deteksi Real-time
+# 5. Program Utama Deteksi Real-time
 SEQ_LEN = 90
 sequence = deque(maxlen=SEQ_LEN)        # Buffer untuk menyimpan 90 frame terakhir
-threshold = 0.6                          # Confidence Threshold
+threshold = 0.7                          # Confidence Threshold
 predicted_action = "-"
 predicted_confidence = 0.0
 predictions_history = deque(maxlen=5)    # Histori untuk stabilisasi prediksi
@@ -228,32 +110,17 @@ frame_counter = 0
 prediction_thread = None
 pred_lock = threading.Lock()
 
-cap = cv2.VideoCapture(0)  # Ganti ke angka lain jika kamera tidak terdeteksi (misal 1, 2, 3)
+cap = cv2.VideoCapture(0) # Ganti ke angka lain jika kamera tidak terdeteksi (misal 0 untuk built-in cam)
 if not cap.isOpened():
-    print("Kamera indeks 0 tidak tersedia, mencoba indeks 1...")
-    cap = cv2.VideoCapture(1)
-if not cap.isOpened():
-    print("Kamera indeks 1 tidak tersedia, mencoba indeks 2...")
-    cap = cv2.VideoCapture(2)
-
-# Cek spesifikasi kamera
-print(f"Resolution: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
-print(f"FPS: {cap.get(cv2.CAP_PROP_FPS)}")
-
-fps_start_time = time.time()
-fps_counter = 0
+    print("Kamera indeks 1 tidak tersedia, mencoba indeks 0...")
+    cap = cv2.VideoCapture(0)
 
 def predict_action(input_data):
     global predicted_action, predicted_confidence
 
-    # Konversi ke tensor PyTorch
-    input_tensor = torch.from_numpy(input_data).float().to(device)
-
-    with torch.no_grad():
-        logits = model(input_tensor)
-        probs = torch.softmax(logits, dim=1)
-        best_idx = int(probs.argmax(dim=1).item())
-        best_conf = float(probs[0, best_idx].item())
+    res = model(input_data, training=False)[0].numpy()
+    best_idx = int(np.argmax(res))
+    best_conf = float(res[best_idx])
 
     if best_conf > threshold:
         current_pred = actions[best_idx]
@@ -277,7 +144,7 @@ def predict_action(input_data):
 
 
 def put_text_with_bg(img, text, org, font_scale=0.7, color=(255, 255, 255),
-                    bg=(0, 0, 0), thickness=2, pad=6):
+                     bg=(0, 0, 0), thickness=2, pad=6):
     """Helper menggambar teks dengan background gelap agar mudah dibaca."""
     font = cv2.FONT_HERSHEY_SIMPLEX
     (tw, th), baseline = cv2.getTextSize(text, font, font_scale, thickness)
@@ -335,14 +202,6 @@ with HandLandmarker.create_from_options(options) as landmarker:
             cur_conf = predicted_confidence
         cv2.putText(frame, f'Deteksi: {cur_action}  ({cur_conf*100:.1f}%)',
                     (10, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
-
-        # FPS counter
-        fps_counter += 1
-        if time.time() - fps_start_time >= 1.0:
-            fps = fps_counter / (time.time() - fps_start_time)
-            print(f"FPS: {fps:.1f}")
-            fps_counter = 0
-            fps_start_time = time.time()
 
         # Progress bar pengisian buffer (kanan atas)
         fill_ratio = len(sequence) / SEQ_LEN
