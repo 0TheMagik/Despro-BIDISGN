@@ -1,19 +1,27 @@
-from __future__ import annotations
-
 import os
-from pathlib import Path
-
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
+import json
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from tensorflow.keras.models import load_model
+from typing import List, Union
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
+app = FastAPI(title="Hand Skeleton AI Model on Cloud Run")
 
-app = FastAPI(title="BISINDO Vertex AI Predictor")
+# Izinkan browser HP mengakses Cloud Run tanpa blokir CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-LABELS = np.array([
+# =====================================================================
+# 1. MUAT MODEL AI ANDA SAAT SERVER MENYALA (COLD START)
+# =====================================================================
+# Sesuaikan daftar label kelas dengan urutan output model AI Anda
+CLASS_LABELS = [
     "Kita",
     "Kamu",
     "Siapa",
@@ -24,64 +32,100 @@ LABELS = np.array([
     "Dimana",
     "Terima Kasih",
     "Apa",
-])
+]
 
-MODEL_PATH = Path(os.getenv("MODEL_PATH", "/app/model/deployment_model/model_cnn_lstm_isyarat.keras"))
-model = None
-TARGET_FRAMES = 90
-TARGET_FEATURES = 126
+# UNCOMMENT SALAH SATU SESUAI FORMAT MODEL ANDA:
+# --- A. Jika menggunakan TensorFlow / Keras (.h5 atau .keras) ---
+import tensorflow as tf
+# ai_model = tf.keras.models.load_model("model_cnn_lstm_isyarat.keras")
 
+# --- B. Jika menggunakan Scikit-Learn / Joblib (.pkl) ---
+# import joblib
+# ai_model = joblib.load("model_anda.pkl")
 
-class PredictRequest(BaseModel):
-    instances: list[list[list[float]]] = Field(..., description="Batch of sequences with shape [frames, features]")
+# --- C. Jika menggunakan ONNX Runtime (.onnx) ---
+# import onnxruntime as ort
+# ort_session = ort.InferenceSession("model_anda.onnx")
 
-
-@app.on_event("startup")
-def startup() -> None:
-    global model
-    if not MODEL_PATH.exists():
-        raise RuntimeError(f"Model not found at {MODEL_PATH}")
-    model = load_model(MODEL_PATH)
+ai_model = tf.keras.models.load_model("model_cnn_lstm_isyarat.keras")
 
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
+# =====================================================================
+# 2. FUNGSI INFERENSI (MENDUKUNG SINGLE FRAME & SEQUENCE VIDEO)
+# =====================================================================
+def run_model_inference(landmarks_data: list) -> dict:
+    """
+    Menerima input dari HP:
+    - Single Frame: array 1D berisi 63 angka -> diubah ke shape (1, 63)
+    - Video Sequence: array 2D berisi [N_frames, 63] -> diubah ke shape (1, N_frames, 63)
+    """
+    arr = np.array(landmarks_data, dtype=np.float32)
 
-def predict_one(instance: list[list[float]]):
-    if model is None:
-        raise RuntimeError("Model has not been loaded")
+    # Otomatis sesuaikan dimensi batch (tambahkan dimensi batch = 1 di depan)
+    if arr.ndim == 1:
+        # Bentuk: (63,) -> (1, 63) untuk model Dense / MLP / RandomForest
+        input_tensor = np.expand_dims(arr, axis=0)
+    elif arr.ndim == 2:
+        # Bentuk: (N_frames, 63) -> (1, N_frames, 63) untuk model LSTM / GRU / 1D-CNN
+        input_tensor = np.expand_dims(arr, axis=0)
+    else:
+        raise ValueError(f"Dimensi input tidak valid: {arr.shape}")
 
-    array = np.asarray(instance, dtype=np.float32)
-    if array.ndim != 2:
-        raise HTTPException(status_code=400, detail="Each instance must be a 2D sequence")
-
-    if array.shape[1] != TARGET_FEATURES:
-        if array.shape[1] > TARGET_FEATURES:
-            array = array[:, :TARGET_FEATURES]
-        else:
-            padding = np.zeros((array.shape[0], TARGET_FEATURES - array.shape[1]), dtype=np.float32)
-            array = np.concatenate([array, padding], axis=1)
-
-    if array.shape[0] > TARGET_FRAMES:
-        array = array[:TARGET_FRAMES]
-    elif array.shape[0] < TARGET_FRAMES:
-        padding = np.zeros((TARGET_FRAMES - array.shape[0], TARGET_FEATURES), dtype=np.float32)
-        array = np.concatenate([array, padding], axis=0)
-
-    prediction = model(array[np.newaxis, ...], training=False)[0].numpy()
-    best_idx = int(np.argmax(prediction))
-    best_confidence = float(prediction[best_idx])
+    # --- JIKA MODEL ASLI SUDAH DIMUAT ---
+    if ai_model is not None:
+        # Contoh untuk Keras / TensorFlow:
+        predictions = ai_model.predict(input_tensor, verbose=0)[0]
+        class_idx = int(np.argmax(predictions))
+        confidence = float(predictions[class_idx])
+        label = CLASS_LABELS[class_idx] if class_idx < len(CLASS_LABELS) else f"Class_{class_idx}"
+    else:
+        # Simulasi jika Anda sedang mengetes koneksi sebelum memasukkan file model
+        label = "Simulasi_Gestur_OK"
+        confidence = 0.975
 
     return {
-        "label": LABELS[best_idx],
-        "confidence": best_confidence,
-        "scores": prediction.tolist(),
+        "status": "success",
+        "label": label,
+        "confidence": round(confidence * 100, 2),
+        "input_shape": list(input_tensor.shape)
     }
 
 
+# =====================================================================
+# 3. ENDPOINT HTTP POST & WEBSOCKET
+# =====================================================================
+class LandmarkPayload(BaseModel):
+    # Bisa menerima [63 float] atau [[63 float], [63 float], ...]
+    landmarks: Union[List[float], List[List[float]]]
+
+@app.get("/")
+def health_check():
+    return {"status": "online", "service": "Cloud Run Hand AI Inference"}
+
 @app.post("/predict")
-def predict(request: PredictRequest):
-    predictions = [predict_one(instance) for instance in request.instances]
-    return {"predictions": predictions}
+async def predict_http(payload: LandmarkPayload):
+    try:
+        return run_model_inference(payload.landmarks)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.websocket("/ws/predict")
+async def predict_websocket(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            data_str = await websocket.receive_text()
+            payload = json.loads(data_str)
+
+            if "landmarks" not in payload:
+                await websocket.send_json({"status": "error", "message": "Key 'landmarks' tidak ditemukan"})
+                continue
+
+            result = run_model_inference(payload["landmarks"])
+            await websocket.send_json(result)
+
+    except WebSocketDisconnect:
+        print("Perangkat HP terputus dari WebSocket.")
+    except Exception as e:
+        await websocket.send_json({"status": "error", "message": str(e)})
