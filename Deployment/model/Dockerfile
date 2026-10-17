@@ -7,11 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY Deployment/model/requirements.txt requirements.txt
+COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY Deployment/model/app.py app.py
-COPY Deployment/model/model_cnn_lstm_isyarat.keras model_cnn_lstm_isyarat.keras
+COPY app.py app.py
+COPY model_cnn_lstm_isyarat.keras model_cnn_lstm_isyarat.keras
 
 ENV PORT=8080
 
