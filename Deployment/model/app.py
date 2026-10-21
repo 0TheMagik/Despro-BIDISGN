@@ -1,14 +1,89 @@
-import os
 import json
+import os
+from pathlib import Path
+from typing import Any
+
 import numpy as np
-from typing import List, Union
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import torch
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from torch import nn
 
-app = FastAPI(title="Hand Skeleton AI Model on Cloud Run")
 
-# Izinkan browser HP mengakses Cloud Run tanpa blokir CORS
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODEL_PATH = Path(os.getenv("MODEL_PATH", "model_cnn_lstm_isyarat.pt"))
+FEATURES = 126
+VIDEO_FRAMES = 90
+
+
+class CNNLSTM(nn.Module):
+    def __init__(self, num_classes: int, **config: Any) -> None:
+        super().__init__()
+        filters_1 = config.get("filters_1", 64)
+        filters_2 = config.get("filters_2", 64)
+        lstm_1 = config.get("lstm_1", 64)
+        lstm_2 = config.get("lstm_2", 64)
+        lstm_3 = config.get("lstm_3", 64)
+        dense_1 = config.get("dense_1", 64)
+        dense_2 = config.get("dense_2", 32)
+        dropout = config.get("dropout", 0.2)
+        self.cnn = nn.Sequential(
+            nn.Conv1d(FEATURES, filters_1, 3, padding="same"),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Dropout(dropout),
+            nn.Conv1d(filters_1, filters_2, 3, padding="same"),
+            nn.ReLU(),
+            nn.MaxPool1d(2),
+            nn.Dropout(dropout),
+        )
+        self.lstm = nn.LSTM(filters_2, lstm_1, batch_first=True)
+        self.lstm_2 = nn.LSTM(lstm_1, lstm_2, batch_first=True)
+        self.lstm_3 = nn.LSTM(lstm_2, lstm_3, batch_first=True)
+        self.temporal_dropout = nn.Dropout(dropout)
+        self.classifier = nn.Sequential(
+            nn.Linear(lstm_3, dense_1),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(dense_1, dense_2),
+            nn.ReLU(),
+            nn.Linear(dense_2, num_classes),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        features = self.cnn(inputs.transpose(1, 2)).transpose(1, 2)
+        features, _ = self.lstm(features)
+        features = self.temporal_dropout(torch.relu(features))
+        features, _ = self.lstm_2(features)
+        features = self.temporal_dropout(torch.relu(features))
+        features, _ = self.lstm_3(features)
+        features = self.temporal_dropout(torch.relu(features))
+        return self.classifier(features[:, -1])
+
+
+def load_model() -> tuple[nn.Module, list[str], int]:
+    if not MODEL_PATH.is_file():
+        raise FileNotFoundError(f"Checkpoint tidak ditemukan: {MODEL_PATH}")
+    checkpoint = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint bukan dictionary PyTorch yang valid.")
+    actions = checkpoint.get("actions")
+    if not isinstance(actions, list) or not all(isinstance(x, str) for x in actions):
+        raise ValueError("Checkpoint tidak memiliki daftar actions yang valid.")
+    if int(checkpoint.get("features", FEATURES)) != FEATURES:
+        raise ValueError("Checkpoint tidak memakai 126 fitur per frame.")
+    frames = int(checkpoint.get("video_frames", VIDEO_FRAMES))
+    config = checkpoint.get("model_config", {})
+    model = CNNLSTM(len(actions), **config)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(DEVICE).eval()
+    return model, actions, frames
+
+
+ai_model, class_labels, sequence_length = load_model()
+
+app = FastAPI(title="Hand Skeleton AI Model on Cloud Run (PyTorch)")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,98 +92,47 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =====================================================================
-# 1. MUAT MODEL AI ANDA SAAT SERVER MENYALA (COLD START)
-# =====================================================================
-# Sesuaikan daftar label kelas dengan urutan output model AI Anda
-CLASS_LABELS = [
-    "Kita",
-    "Kamu",
-    "Siapa",
-    "Nunggu",
-    "Saya",
-    "Sudah",
-    "Hallo",
-    "Dimana",
-    "Terima Kasih",
-    "Apa",
-]
 
-# UNCOMMENT SALAH SATU SESUAI FORMAT MODEL ANDA:
-# --- A. Jika menggunakan TensorFlow / Keras (.h5 atau .keras) ---
-import tensorflow as tf
-# ai_model = tf.keras.models.load_model("model_cnn_lstm_isyarat.keras")
-
-# --- B. Jika menggunakan Scikit-Learn / Joblib (.pkl) ---
-# import joblib
-# ai_model = joblib.load("model_anda.pkl")
-
-# --- C. Jika menggunakan ONNX Runtime (.onnx) ---
-# import onnxruntime as ort
-# ort_session = ort.InferenceSession("model_anda.onnx")
-
-ai_model = tf.keras.models.load_model("model_cnn_lstm_isyarat.keras")
-
-
-
-# =====================================================================
-# 2. FUNGSI INFERENSI (MENDUKUNG SINGLE FRAME & SEQUENCE VIDEO)
-# =====================================================================
 def run_model_inference(landmarks_data: list) -> dict:
-    """
-    Menerima input dari HP:
-    - Single Frame: array 1D berisi 63 angka -> diubah ke shape (1, 63)
-    - Video Sequence: array 2D berisi [N_frames, 63] -> diubah ke shape (1, N_frames, 63)
-    """
-    arr = np.array(landmarks_data, dtype=np.float32)
-
-    # Otomatis sesuaikan dimensi batch (tambahkan dimensi batch = 1 di depan)
-    if arr.ndim == 1:
-        # Bentuk: (63,) -> (1, 63) untuk model Dense / MLP / RandomForest
-        input_tensor = np.expand_dims(arr, axis=0)
-    elif arr.ndim == 2:
-        # Bentuk: (N_frames, 63) -> (1, N_frames, 63) untuk model LSTM / GRU / 1D-CNN
-        input_tensor = np.expand_dims(arr, axis=0)
+    arr = np.asarray(landmarks_data, dtype=np.float32)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2 or arr.shape[1] != FEATURES:
+        raise ValueError(f"Input harus berbentuk [N, 126], bukan {arr.shape}.")
+    if arr.shape[0] >= sequence_length:
+        arr = arr[-sequence_length:]
     else:
-        raise ValueError(f"Dimensi input tidak valid: {arr.shape}")
+        arr = np.pad(arr, ((sequence_length - arr.shape[0], 0), (0, 0)))
 
-    # --- JIKA MODEL ASLI SUDAH DIMUAT ---
-    if ai_model is not None:
-        # Contoh untuk Keras / TensorFlow:
-        predictions = ai_model.predict(input_tensor, verbose=0)[0]
-        class_idx = int(np.argmax(predictions))
-        confidence = float(predictions[class_idx])
-        label = CLASS_LABELS[class_idx] if class_idx < len(CLASS_LABELS) else f"Class_{class_idx}"
-    else:
-        # Simulasi jika Anda sedang mengetes koneksi sebelum memasukkan file model
-        label = "Simulasi_Gestur_OK"
-        confidence = 0.975
-
+    input_tensor = torch.from_numpy(arr).unsqueeze(0).to(DEVICE)
+    with torch.inference_mode():
+        probabilities = torch.softmax(ai_model(input_tensor), dim=1)[0]
+    class_idx = int(torch.argmax(probabilities).item())
     return {
         "status": "success",
-        "label": label,
-        "confidence": round(confidence * 100, 2),
-        "input_shape": list(input_tensor.shape)
+        "label": class_labels[class_idx],
+        "confidence": round(float(probabilities[class_idx]) * 100, 2),
+        "input_shape": list(input_tensor.shape),
     }
 
 
-# =====================================================================
-# 3. ENDPOINT HTTP POST & WEBSOCKET
-# =====================================================================
 class LandmarkPayload(BaseModel):
-    # Bisa menerima [63 float] atau [[63 float], [63 float], ...]
-    landmarks: Union[List[float], List[List[float]]]
+    landmarks: list
+
 
 @app.get("/")
-def health_check():
-    return {"status": "online", "service": "Cloud Run Hand AI Inference"}
+@app.get("/health")
+def health_check() -> dict:
+    return {"status": "online", "vocabulary_size": len(class_labels)}
+
 
 @app.post("/predict")
-async def predict_http(payload: LandmarkPayload):
+async def predict_http(payload: LandmarkPayload) -> dict:
     try:
         return run_model_inference(payload.landmarks)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except (TypeError, ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
 
 @app.websocket("/ws/predict")
 async def predict_websocket(websocket: WebSocket):
@@ -116,16 +140,18 @@ async def predict_websocket(websocket: WebSocket):
     try:
         while True:
             data_str = await websocket.receive_text()
-            payload = json.loads(data_str)
+            try:
+                payload = json.loads(data_str)
 
-            if "landmarks" not in payload:
-                await websocket.send_json({"status": "error", "message": "Key 'landmarks' tidak ditemukan"})
-                continue
+                if "landmarks" not in payload:
+                    await websocket.send_json({"status": "error", "message": "Key 'landmarks' tidak ditemukan"})
+                    continue
 
-            result = run_model_inference(payload["landmarks"])
-            await websocket.send_json(result)
+                result = run_model_inference(payload["landmarks"])
+                await websocket.send_json(result)
+            except Exception as inner_e:
+                # Tangkap error inferensi di dalam loop agar koneksi WebSocket tidak putus
+                await websocket.send_json({"status": "error", "message": str(inner_e)})
 
     except WebSocketDisconnect:
-        print("Perangkat HP terputus dari WebSocket.")
-    except Exception as e:
-        await websocket.send_json({"status": "error", "message": str(e)})
+        print("Perangkat terputus dari WebSocket.")

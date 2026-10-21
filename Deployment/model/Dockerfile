@@ -11,7 +11,7 @@ COPY requirements.txt requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py app.py
-COPY model_cnn_lstm_isyarat.keras model_cnn_lstm_isyarat.keras
+COPY model_cnn_lstm_isyarat.pt model_cnn_lstm_isyarat.pt
 
 ENV PORT=8080
 
