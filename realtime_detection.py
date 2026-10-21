@@ -31,53 +31,31 @@ FEATURES = 126
 VIDEO_FRAMES = 90
 
 
-def resample_to_90(sequence):
-    """Resample sequence ke tepat 90 frame menggunakan linear interpolation."""
-    if sequence.shape[0] == SEQ_LEN:
-        return sequence.astype(np.float32)
-    source_positions = np.linspace(0.0, 1.0, sequence.shape[0])
-    target_positions = np.linspace(0.0, 1.0, SEQ_LEN)
-    resampled = np.empty((SEQ_LEN, sequence.shape[1]), dtype=np.float32)
-    for feature_index in range(sequence.shape[1]):
-        resampled[:, feature_index] = np.interp(
-            target_positions, source_positions, sequence[:, feature_index]
-        )
-    return resampled
-
-
 def normalize_sequence(sequence):
-    """Normalisasi landmark tangan - SAMA PERSIS dengan preprocessing training notebook.
-
-    sequence shape: (num_frames, 126) — array of frames dari deque.
-    Returns: (num_frames, 126) normalized.
-    """
-    if sequence.ndim == 1:
-        sequence = sequence.reshape(1, -1)
-
-    # Reshape: (num_frames, 126) -> (num_frames, 2, 21, 3)
-    normalized = sequence.reshape(sequence.shape[0], 2, 21, 3).copy()
+    """Normalisasi landmark tangan - SAM dengan preprocessing training notebook."""
+    # sequence shape: (126,) per frame, kita treat sebagai single frame
+    # Normalisasi per-frame: reshape ke (2, 21, 3) [2 tangan, 21 landmarks, 3 koordinat]
+    normalized = sequence.reshape(2, 21, 3).copy()
 
     for hand_index in range(2):
-        hand = normalized[:, hand_index]  # shape: (num_frames, 21, 3)
-
-        # Cek frame mana yang valid (bukan nol)
-        valid_frames = np.abs(hand).sum(axis=(1, 2)) > 0
-        if not np.any(valid_frames):
+        hand = normalized[hand_index]
+        # Cek apakah landmark valid (tidak nol)
+        valid = np.abs(hand).sum() > 0
+        if not valid:
             continue
 
-        # Kurangi dengan wrist (landmark 0) — per frame
-        wrist = hand[:, :1, :].copy()  # shape: (num_frames, 1, 3)
+        # Kurangi dengan wrist (landmark 0)
+        wrist = hand[0:1, :].copy()
         hand -= wrist
 
-        # Scale normalization — max norm per frame, lalu expand dims agar broadcast
-        scale = np.linalg.norm(hand, axis=2).max(axis=1, keepdims=True)  # shape: (num_frames, 1, 1)
-        scale = np.where(scale > 1e-6, scale, 1.0)
-        hand /= scale[:, :, None]
+        # Scale normalization
+        scale = np.linalg.norm(hand, axis=1).max()
+        if scale > 1e-6:
+            hand /= scale
 
-        # Set frame invalid ke nol
-        normalized[~valid_frames, hand_index] = 0.0
+        normalized[hand_index] = hand
 
-    return normalized.reshape(sequence.shape[0], -1).astype(np.float32)
+    return normalized.reshape(-1)
 
 
 class CNNLSTM(nn.Module):
@@ -229,36 +207,26 @@ def extract_keypoints(results):
         if arr.shape[0] < 126:
             arr = np.concatenate([arr, np.zeros(126 - arr.shape[0], dtype=np.float32)])
 
-        # Simpan sebagai fallback (raw, belum dinormalisasi)
-        last_valid_keypoints = arr[:126].copy()
-        return arr[:126]
+        # Terapkan normalisasi yang sama dengan preprocessing training
+        arr = normalize_sequence(arr[:126])
+        last_valid_keypoints = arr  # Simpan sebagai fallback
+        return arr
 
     # Jika tracking hilang, pakai frame terakhir yang valid (smooth interpolation)
     if last_valid_keypoints is not None:
-        return last_valid_keypoints.copy()
+        return last_valid_keypoints
     return np.zeros(126, dtype=np.float32)
 
 # 6. Program Utama Deteksi Real-time
 SEQ_LEN = 90
-MIN_FRAMES = 30                          # Minimal frame untuk gestur pendek/cepat
-MOVEMENT_THRESHOLD = 0.015               # Threshold gerakan untuk trigger gestur
-STABILITY_THRESHOLD = 0.005              # Threshold gerakan untuk menganggap gestur selesai
-STABILITY_FRAMES = 8                    # Jumlah frame stabil untuk trigger prediksi
-
-threshold = 0.7                          # Confidence Threshold (dinaikkan ke 0.7)
+sequence = deque(maxlen=SEQ_LEN)        # Buffer untuk menyimpan 90 frame terakhir
+threshold = 0.6                          # Confidence Threshold
 predicted_action = "-"
 predicted_confidence = 0.0
-predictions_history = deque(maxlen=3)     # Histori untuk stabilisasi (diubah ke 3)
+predictions_history = deque(maxlen=5)    # Histori untuk stabilisasi prediksi
 frame_counter = 0
 prediction_thread = None
 pred_lock = threading.Lock()
-
-# --- Gesture-triggered state ---
-sequence = deque(maxlen=SEQ_LEN)          # Buffer utama
-last_frame = None                         # Frame sebelumnya untuk hitung movement
-is_gesturing = False                      # Apakah sedang dalam gestur
-stability_counter = 0                     # Counter frame stabil
-gesture_started = False                   # Apakah gestur sudah dimulai
 
 cap = cv2.VideoCapture(0)  # Ganti ke angka lain jika kamera tidak terdeteksi (misal 1, 2, 3)
 if not cap.isOpened():
@@ -278,9 +246,8 @@ fps_counter = 0
 def predict_action(input_data):
     global predicted_action, predicted_confidence
 
-    # Normalisasi SELEURUH sequence sekaligus — SAMA PERSIS dengan training notebook
-    input_normalized = normalize_sequence(input_data[0])  # (90, 126)
-    input_tensor = torch.from_numpy(input_normalized).unsqueeze(0).float().to(device)  # (1, 90, 126)
+    # Konversi ke tensor PyTorch
+    input_tensor = torch.from_numpy(input_data).float().to(device)
 
     with torch.no_grad():
         logits = model(input_tensor)
@@ -297,7 +264,7 @@ def predict_action(input_data):
         predictions_history.append(current_pred)
         predicted_confidence = best_conf
 
-        # Stabilisasi: ambil prediksi terbanyak dari 3 riwayat terakhir
+        # Stabilisasi: ambil prediksi terbanyak dari 5 riwayat terakhir
         if len(predictions_history) == predictions_history.maxlen:
             counts = {}
             for p in predictions_history:
@@ -325,75 +292,40 @@ with HandLandmarker.create_from_options(options) as landmarker:
         if not ret:
             break
 
+        # PENTING: Dataset training direkam TANPA flip horizontal
+        # (lihat dataset_collection_V2.py — out.write(frame) menulis frame asli).
+        # Jadi MediaPipe HARUS memproses frame asli (unflipped) agar koordinat
+        # cocok dengan distribusi data training. Flip hanya untuk display.
         h, w = frame.shape[:2]
 
-        # Konversi frame ASLI ke RGB untuk Mediapipe
+        # Konversi frame ASLI ke RGB untuk Mediapipe (sesuai pipeline training)
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
 
-        # Deteksi landmark (timestamp untuk mode VIDEO)
+        # Deteksi landmark (gunakan timestamp untuk mode VIDEO)
         timestamp_ms = int(time.time() * 1000)
         results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        # Ekstraksi keypoints
+        # Ekstraksi keypoints dari frame asli untuk model
         keypoints = extract_keypoints(results)
 
-        # Buat frame display dengan mirror
+        # Buat frame display dengan mirror agar terasa natural seperti cermin
         frame = cv2.flip(frame, 1)
+
+        # Gambar landmark di frame display (mirror x supaya tetap menempel di tangan)
         draw_hand_landmarks(frame, results, mirror=True)
-
-        # ========== GESTURE-TRIGGERED DETECTION ==========
-        # Hitung movement magnitude (L2 norm perubahan landmark)
-        movement_magnitude = 0.0
-        if last_frame is not None:
-            diff = keypoints - last_frame
-            movement_magnitude = float(np.linalg.norm(diff))
-
-        last_frame = keypoints.copy()
-
-        # Decision: mulai atau lanjut gestur?
-        if movement_magnitude > MOVEMENT_THRESHOLD:
-            is_gesturing = True
-            stability_counter = 0
-            if not gesture_started:
-                gesture_started = True
-                sequence.clear()  # Mulai fresh
-        elif is_gesturing:
-            if movement_magnitude < STABILITY_THRESHOLD:
-                stability_counter += 1
-            else:
-                stability_counter = 0
-
-        # Selalu simpan ke buffer
         sequence.append(keypoints)
         frame_counter += 1
 
-        # Trigger prediksi: gestur mulai + cukup frame + cukup stabil
-        can_predict = (
-            gesture_started
-            and len(sequence) >= MIN_FRAMES
-            and stability_counter >= STABILITY_FRAMES
-        )
-
-        if can_predict and frame_counter % 3 == 0:  # prediksi tiap 3 frame
-            # Resample jika kurang dari SEQ_LEN
-            frames_array = np.array(list(sequence), dtype=np.float32)
-            if frames_array.shape[0] < SEQ_LEN:
-                frames_array = resample_to_90(frames_array)
-
-            input_data = frames_array.reshape(1, SEQ_LEN, 126)
+        # Mulai Prediksi jika sequence sudah terkumpul penuh
+        # Optimasi: prediksi setiap 5 frame, dijalankan di thread agar UI tetap lancar
+        if len(sequence) == SEQ_LEN and frame_counter % 5 == 0:
+            input_data = np.expand_dims(list(sequence), axis=0)
             if prediction_thread is None or not prediction_thread.is_alive():
                 prediction_thread = threading.Thread(
                     target=predict_action, args=(input_data,), daemon=True
                 )
                 prediction_thread.start()
-
-        # Reset state setelah gesture selesai (setelah prediksi)
-        if is_gesturing and stability_counter >= STABILITY_FRAMES:
-            is_gesturing = False
-            gesture_started = False
-            stability_counter = 0
-        # =============================================
 
         # ----- UI Overlay -----
         # Bar atas: kata terdeteksi + confidence
@@ -412,17 +344,14 @@ with HandLandmarker.create_from_options(options) as landmarker:
             fps_counter = 0
             fps_start_time = time.time()
 
-        # Progress bar + gesture status indicator (kanan atas)
+        # Progress bar pengisian buffer (kanan atas)
+        fill_ratio = len(sequence) / SEQ_LEN
         bar_w = 200
         bar_x = w - bar_w - 10
-        bar_color = (0, 200, 0) if is_gesturing else (0, 165, 255)
         cv2.rectangle(frame, (bar_x, 12), (bar_x + bar_w, 38), (255, 255, 255), 1)
-        fill_pixels = int(bar_w * min(len(sequence) / MIN_FRAMES, 1.0))
-        cv2.rectangle(frame, (bar_x, 12), (bar_x + fill_pixels, 38), bar_color, -1)
-        status_text = "GERAK" if is_gesturing else "DIAM"
-        status_color = (0, 255, 0) if is_gesturing else (150, 150, 150)
-        cv2.putText(frame, status_text, (bar_x + 5, 29),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, status_color, 1, cv2.LINE_AA)
+        cv2.rectangle(frame, (bar_x, 12),
+                      (bar_x + int(bar_w * fill_ratio), 38),
+                      (0, 200, 0) if fill_ratio >= 1 else (0, 165, 255), -1)
 
         # Petunjuk tombol
         cv2.putText(frame, "[Q] Keluar",
