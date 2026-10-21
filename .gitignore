@@ -16,3 +16,5 @@ ptxas
 *.npy
 *.mp4
 .claude/
+Prompt.md
+dataset/
