@@ -12,7 +12,7 @@ Client atau aplikasi mengirim video ke service handlandmarker. Service ini menge
 ## Struktur
 
 - `handlandmarker/` - service preprocessing video menjadi keypoint.
-- `model/` - service inferensi CNN + LSTM.
+- `model/` - service inferensi CNN + LSTM berbasis PyTorch.
 - `docker-compose.yml` - menjalankan keduanya secara lokal.
 
 ## Jalankan lokal dengan Docker
@@ -40,14 +40,13 @@ Kalau kamu ingin pengalaman seperti `realtime_detection.py` tetapi memakai endpo
 python Deployment/realtime_detection_docker.py
 ```
 
-Kalau service tidak ada di `localhost`, atur environment variable:
+Kalau service model tidak berada di `localhost:8002`, atur URL WebSocket:
 
 ```bash
-set HANDLANDMARKER_URL=http://127.0.0.1:8001
-set MODEL_URL=http://127.0.0.1:8002
+set MODEL_WS_URL=ws://127.0.0.1:8002/ws/predict
 ```
 
-Script ini tetap realtime dari webcam lokal, tetapi inferensi dilakukan lewat HTTP ke container handlandmarker dan model.
+Script ini tetap realtime dari webcam lokal dan mengirim sequence landmark langsung ke endpoint WebSocket model.
 
 ## Cloud Run GCP
 
@@ -100,18 +99,23 @@ gcloud run deploy model-service \
 
 - `GET /health`
 - `POST /predict`
+- `WebSocket /ws/predict`
 
-`POST /predict` menerima JSON:
+Kedua endpoint prediksi menerima JSON dengan format:
 
 ```json
 {
-  "instances": [
+  "landmarks": [
     [[...126 nilai...], ...]
   ]
 }
 ```
 
+Klien realtime memakai `WebSocket /ws/predict`; endpoint HTTP dipakai untuk pengujian satu request.
+
 ## Catatan penting
 
 - `realtime_detection.py` tetap berguna untuk local webcam testing, tetapi tidak cocok langsung dipindah ke Cloud Run karena bergantung pada kamera lokal.
 - Model service sekarang akan memotong atau padding sequence menjadi 90 frame dan 126 fitur per frame, supaya output handlandmarker tetap valid untuk inferensi.
+- Model service memuat `Prototipe kode versi pytorch/best_model/model_cnn_lstm_isyarat.pt` dari checkpoint PyTorch terbaik.
+- Urutan dan seluruh label kosakata dibaca dari field `actions` di checkpoint, sehingga tidak ada daftar label hardcode yang dapat tertinggal dari model.
