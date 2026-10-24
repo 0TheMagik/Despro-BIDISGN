@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import requests
 
 # Paksa eksekusi di CPU dengan menonaktifkan GPU CUDA Visibility
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -228,13 +229,78 @@ frame_counter = 0
 prediction_thread = None
 pred_lock = threading.Lock()
 
-cap = cv2.VideoCapture(0)  # Ganti ke angka lain jika kamera tidak terdeteksi (misal 1, 2, 3)
+
+class MjpegStream:
+    """Read JPEG frames from an ESP32 multipart stream when OpenCV cannot."""
+
+    def __init__(self, url):
+        self.response = requests.get(
+            url,
+            stream=True,
+            timeout=(5, 30),
+            headers={"Accept": "multipart/x-mixed-replace"},
+        )
+        self.response.raise_for_status()
+        self.buffer = bytearray()
+        self.iterator = self.response.iter_content(chunk_size=4096)
+
+    def isOpened(self):
+        return True
+
+    def get(self, _property):
+        return 0
+
+    def read(self):
+        while True:
+            start = self.buffer.find(b"\xff\xd8")
+            end = self.buffer.find(b"\xff\xd9", start + 2)
+            if start >= 0 and end >= 0:
+                jpeg = bytes(self.buffer[start : end + 2])
+                del self.buffer[: end + 2]
+                frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                return frame is not None, frame
+
+            try:
+                chunk = next(self.iterator)
+            except StopIteration:
+                return False, None
+            if chunk:
+                self.buffer.extend(chunk)
+
+    def release(self):
+        self.response.close()
+
+
+camera_source = os.getenv("CAMERA_SOURCE", "0").strip()
+if camera_source.isdigit():
+    camera_source = int(camera_source)
+    print(f"Membuka kamera lokal indeks {camera_source}...")
+else:
+    print(f"Membuka stream ESP32-CAM: {camera_source}")
+
+if isinstance(camera_source, str):
+    print("Menggunakan pembaca MJPEG manual untuk stream ESP32-CAM...")
+    try:
+        cap = MjpegStream(camera_source)
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Stream ESP32-CAM tidak mengirim data: {camera_source}. "
+            "Periksa firmware dan log Serial Monitor."
+        ) from exc
+else:
+    cap = cv2.VideoCapture(camera_source)
+if not cap.isOpened() and isinstance(camera_source, int):
+    for camera_index in (1, 2):
+        print(f"Kamera indeks {camera_source} tidak tersedia, mencoba indeks {camera_index}...")
+        cap = cv2.VideoCapture(camera_index)
+        if cap.isOpened():
+            break
+
 if not cap.isOpened():
-    print("Kamera indeks 0 tidak tersedia, mencoba indeks 1...")
-    cap = cv2.VideoCapture(1)
-if not cap.isOpened():
-    print("Kamera indeks 1 tidak tersedia, mencoba indeks 2...")
-    cap = cv2.VideoCapture(2)
+    raise RuntimeError(
+        f"Sumber kamera tidak dapat dibuka: {camera_source}. "
+        "Pastikan ESP32-CAM aktif dan URL /stream dapat diakses."
+    )
 
 # Cek spesifikasi kamera
 print(f"Resolution: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")

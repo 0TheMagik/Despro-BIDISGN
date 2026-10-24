@@ -12,7 +12,7 @@ os.environ["EGL_PLATFORM"] = "surfaceless" # Error Prevention untuk Linux
 
 DATA_PATH = os.path.join('dataset')
 
-num_frames = 90
+num_frames = 60
 
 action_name = input("Masukkan nama aksi/label (contoh: hello) \t: ").strip()
 try:

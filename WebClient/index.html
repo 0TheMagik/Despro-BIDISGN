@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BISINDO Camera Client</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="container">
+      <h1>Deteksi BISINDO</h1>
+      <p class="muted">ESP32-CAM → MediaPipe dua tangan → Cloud Run</p>
+
+      <section class="controls">
+        <label>
+          Alamat ESP32-CAM
+          <input id="cameraBaseUrl" type="url" placeholder="http://192.168.1.50 atau http://192.168.1.50:81/stream">
+        </label>
+        <button id="startButton" type="button">Mulai kamera</button>
+        <button id="stopButton" type="button" disabled>Berhenti</button>
+      </section>
+
+      <section class="status" aria-live="polite">
+        <strong>Status:</strong> <span id="status">Belum dimulai</span>
+      </section>
+
+      <section class="preview">
+        <div>
+          <h2>Kamera ESP32-CAM</h2>
+          <p class="muted">Frame diambil melalui endpoint /capture pada port 80.</p>
+        </div>
+        <div>
+          <h2>Deteksi MediaPipe</h2>
+          <canvas id="landmarkCanvas" width="640" height="480"></canvas>
+        </div>
+      </section>
+
+      <section class="result">
+        <h2>Prediksi</h2>
+        <p id="prediction">Belum ada prediksi</p>
+        <p id="progress">Sequence: 0/90 frame</p>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
