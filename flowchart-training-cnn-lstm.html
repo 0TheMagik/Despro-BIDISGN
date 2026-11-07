@@ -1,0 +1,442 @@
+<title>Alur Training Model Isyarat</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Palette: cool slate ground, teal for data flow, burnt orange for the costly tuning stage.
+     Type: Bricolage Grotesque for display, IBM Plex Sans for prose, IBM Plex Mono for data. */
+  :root{
+    --bg:#f4f7f8; --surface:#ffffff; --fg:#111a1f; --muted:#5b6a72;
+    --line:#cfdae0; --accent:#0d7186; --accent-soft:#e0eff3;
+    --hot:#a9521a; --hot-soft:#fbece1; --chip:#eaf0f2;
+    --display:'Bricolage Grotesque', system-ui, sans-serif;
+    --body:'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --mono:'IBM Plex Mono', ui-monospace, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1215; --surface:#141d21; --fg:#e3edf0; --muted:#94a6ae;
+      --line:#27343a; --accent:#5bcbdd; --accent-soft:#103038;
+      --hot:#e08a52; --hot-soft:#2e2018; --chip:#182227;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1215; --surface:#141d21; --fg:#e3edf0; --muted:#94a6ae;
+    --line:#27343a; --accent:#5bcbdd; --accent-soft:#103038;
+    --hot:#e08a52; --hot-soft:#2e2018; --chip:#182227;
+    color-scheme: dark;
+  }
+
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font-family:var(--body); font-size:16px; line-height:1.6;
+    padding-left:max(16px, env(safe-area-inset-left, 0px));
+    padding-right:max(16px, env(safe-area-inset-right, 0px));
+    padding-block:40px 64px;
+  }
+  body::before{
+    content:""; position:fixed; inset:0 0 auto; height:env(safe-area-inset-top, 0px);
+    z-index:10; background:var(--bg);
+  }
+  .wrap{max-width:980px; margin:0 auto; min-width:0}
+
+  .eyebrow{
+    font-family:var(--mono); font-size:12px; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--accent); margin:0 0 14px;
+  }
+  h1{
+    font-family:var(--display); font-weight:700; font-size:clamp(30px, 5.2vw, 46px);
+    line-height:1.1; letter-spacing:-.02em; margin:0 0 16px; text-wrap:balance;
+  }
+  .lede{font-size:17px; color:var(--muted); max-width:66ch; margin:0 0 28px}
+
+  .facts{display:flex; flex-wrap:wrap; gap:8px; margin:0 0 44px}
+  .fact{
+    background:var(--chip); border:1px solid var(--line); border-radius:7px;
+    padding:7px 12px; display:flex; align-items:baseline; gap:8px; min-width:0;
+  }
+  .fact b{font-family:var(--mono); font-weight:500; font-size:13px; color:var(--accent); font-variant-numeric:tabular-nums}
+  .fact span{font-size:13px; color:var(--muted)}
+
+  figure{margin:0 0 44px}
+  .fig-scroll{overflow-x:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface); padding:14px}
+  .fig-scroll svg{display:block; width:100%; height:auto; min-width:640px}
+  .fig-scroll.tight svg{min-width:560px}
+  figcaption{font-size:14px; color:var(--muted); margin-top:10px; max-width:74ch}
+  figcaption b{color:var(--fg); font-weight:600}
+
+  h2{
+    font-family:var(--display); font-weight:600; font-size:23px; letter-spacing:-.01em;
+    margin:0 0 14px; padding-top:8px;
+  }
+  .rule{height:1px; background:var(--line); border:0; margin:0 0 18px}
+
+  table{border-collapse:collapse; width:100%; font-size:14.5px; margin:0 0 40px}
+  th,td{text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{font-size:11.5px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted); font-weight:600}
+  td.mono,th.mono{font-family:var(--mono); font-size:13px; font-variant-numeric:tabular-nums}
+  td code{font-family:var(--mono); font-size:13px}
+  .tbl-scroll{overflow-x:auto}
+
+  .notes{display:grid; gap:14px; margin:0 0 8px}
+  .note{
+    background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:8px; padding:14px 16px; min-width:0;
+  }
+  .note.flag{border-left-color:var(--hot)}
+  .note h3{font-size:15px; margin:0 0 5px; font-weight:600; font-family:var(--body)}
+  .note p{margin:0; font-size:14.5px; color:var(--muted)}
+  .note code{font-family:var(--mono); font-size:13px; color:var(--fg)}
+
+  footer{margin-top:44px; padding-top:18px; border-top:1px solid var(--line); font-size:13.5px; color:var(--muted)}
+  footer code{font-family:var(--mono); font-size:13px}
+
+  /* SVG primitives */
+  svg .bx{fill:var(--surface); stroke:var(--line); stroke-width:1.5}
+  svg .bx-h{fill:var(--hot-soft); stroke:var(--hot); stroke-width:1.5}
+  svg .bx-d{fill:none; stroke:var(--line); stroke-width:1.2; stroke-dasharray:5 4}
+  svg .ed{fill:none; stroke:var(--muted); stroke-width:1.6; marker-end:url(#arw)}
+  svg .ed-d{fill:none; stroke:var(--muted); stroke-width:1.3; stroke-dasharray:5 4; marker-end:url(#arw)}
+  svg .ed-a{fill:none; stroke:var(--accent); stroke-width:1.6; marker-end:url(#arwa)}
+  svg .mk{fill:var(--muted)}
+  svg .mk-a{fill:var(--accent)}
+  svg .z{fill:var(--accent); font-family:var(--body); font-size:12px; font-weight:700; letter-spacing:.12em}
+  svg .bt{fill:var(--fg); font-family:var(--body); font-size:15.5px; font-weight:600}
+  svg .bt-h{fill:var(--hot); font-family:var(--body); font-size:15.5px; font-weight:600}
+  svg .bm{fill:var(--muted); font-family:var(--mono); font-size:12px}
+  svg .bs{fill:var(--muted); font-family:var(--body); font-size:12.5px}
+  svg .bo{fill:var(--accent); font-family:var(--mono); font-size:12px; font-weight:500}
+  svg .bn{fill:var(--muted); font-family:var(--body); font-size:12px}
+  svg .bn-h{fill:var(--hot); font-family:var(--body); font-size:12.5px; font-weight:600}
+  #f2 .ed{fill:none; stroke:var(--muted); stroke-width:1.6; marker-end:url(#arw2)}
+  #f2 .ed-d{fill:none; stroke:var(--muted); stroke-width:1.3; stroke-dasharray:5 4; marker-end:url(#arw2)}
+  #f3 .ed-a{fill:none; stroke:var(--accent); stroke-width:1.6; marker-end:url(#arw3)}
+
+  @media (max-width:600px){
+    body{font-size:15px}
+    .fig-scroll{padding:8px}
+    h2{font-size:20px}
+  }
+</style>
+
+<div class="wrap">
+
+  <p class="eyebrow">Despro-BIDISGN &middot; Prototipe kode versi PyTorch</p>
+  <h1>Alur Training Model Isyarat</h1>
+  <p class="lede">
+    Cara kerja <code>train_cnn_lstm_pytorch.ipynb</code>: landmark tangan dari file <code>.npy</code>
+    dinormalisasi, diaugmentasi, dipecah jadi train/dev/test, lalu dilatih dengan CNN + LSTM.
+    Setelah model dasar dievaluasi, pencarian acak hyperparameter dijalankan untuk mencari
+    konfigurasi terbaik, dan dua checkpoint disimpan untuk dipakai saat deteksi real-time.
+  </p>
+
+  <div class="facts">
+    <div class="fact"><b>90</b><span>frame per video</span></div>
+    <div class="fact"><b>126</b><span>fitur per frame</span></div>
+    <div class="fact"><b>32</b><span>batch size</span></div>
+    <div class="fact"><b>150</b><span>epoch maksimum</span></div>
+    <div class="fact"><b>15</b><span>patience early stop</span></div>
+    <div class="fact"><b>9</b><span>sampel per file asli</span></div>
+    <div class="fact"><b>100</b><span>trial tuning</span></div>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 900 580" role="img" aria-label="Diagram alur persiapan data: file .npy dibaca dan dinormalisasi ke 90 frame, diaugmentasi menjadi 8 varian per file, lalu dipecah menjadi subset train, dev, dan test.">
+        <defs>
+          <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+          <marker id="arwa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk-a" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <text class="z" x="150" y="24">PERSIAPAN DATA</text>
+
+        <rect class="bx" x="150" y="40" width="560" height="58" rx="9"/>
+        <text class="bt" x="168" y="64">Dataset .npy</text>
+        <text class="bm" x="168" y="85">dataset/&lt;action&gt;/*.npy &nbsp;&mdash;&nbsp; bentuk (T, 126)</text>
+
+        <path class="ed" d="M430,98 V126"/>
+
+        <rect class="bx" x="150" y="128" width="560" height="86" rx="9"/>
+        <text class="bt" x="168" y="152">Preprocessing per file</text>
+        <text class="bm" x="168" y="174">resample_sequence &rarr; tepat 90 frame</text>
+        <text class="bm" x="168" y="196">normalize_sequence &rarr; wrist-relative + skala per-frame</text>
+
+        <path class="ed" d="M430,214 V242"/>
+
+        <rect class="bx" x="150" y="244" width="560" height="140" rx="9"/>
+        <text class="bt" x="168" y="268">Augmentasi &mdash; 8 varian per file</text>
+        <text class="bm" x="168" y="292">Spasial: noise 0.02 &middot; noise 0.035 &middot; scale 0.90&ndash;0.97</text>
+        <text class="bm" x="168" y="312">scale 1.03&ndash;1.10 &middot; noise + scale</text>
+        <text class="bm" x="168" y="336">Temporal: speed-up (75&ndash;85% frame) &middot; slow-down (&times;1.20&ndash;1.30)</text>
+        <text class="bm" x="168" y="356">crop (65&ndash;75% frame) &middot; selalu resample balik ke 90</text>
+
+        <path class="ed-d" d="M710,314 H738"/>
+        <text class="bn" x="744" y="292">Augmentasi jalan</text>
+        <text class="bn" x="744" y="308">sebelum split.</text>
+        <text class="bn" x="744" y="328">9 salinan per file</text>
+        <text class="bn" x="744" y="344">bisa jatuh di train</text>
+        <text class="bn" x="744" y="360">dan test &mdash; risiko</text>
+        <text class="bn" x="744" y="376">data bocor.</text>
+
+        <path class="ed" d="M430,384 V412"/>
+
+        <rect class="bx" x="150" y="414" width="560" height="48" rx="9"/>
+        <text class="bt" x="168" y="443">Split 60 / 20 / 20</text>
+
+        <path class="ed" d="M430,462 V480 H235 V500"/>
+        <path class="ed" d="M430,462 V500"/>
+        <path class="ed" d="M430,462 V480 H625 V500"/>
+
+        <rect class="bx" x="150" y="502" width="170" height="62" rx="9"/>
+        <text class="bt" x="164" y="526">Train 60%</text>
+        <text class="bs" x="164" y="546">bobot dilatih</text>
+
+        <rect class="bx" x="345" y="502" width="170" height="62" rx="9"/>
+        <text class="bt" x="359" y="526">Dev 20%</text>
+        <text class="bs" x="359" y="546">monitor + early stop</text>
+
+        <rect class="bx" x="540" y="502" width="170" height="62" rx="9"/>
+        <text class="bt" x="554" y="526">Test 20%</text>
+        <text class="bs" x="554" y="546">evaluasi akhir</text>
+      </svg>
+    </div>
+    <figcaption>
+      <b>Persiapan data.</b> Setiap file .npy (video landmark) diperbaiki panjangnya menjadi 90 frame
+      lalu dinormalisasi relatif terhadap pergelangan tangan. Delapan augmentasi ditambahkan, sehingga satu file
+      asli menghasilkan sembilan sampel, lalu datanya dipecah menjadi tiga subset. Karena
+      <b>augmentasi berjalan sebelum split</b>, varian dari file yang sama bisa muncul di train dan test sekaligus.
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 900 904" role="img" aria-label="Diagram alur training: model CNN plus LSTM dilatih dengan 150 epoch dan early stopping, dievaluasi pada test set, disimpan sebagai base model, lalu pencarian acak 100 trial dijalankan, di-retrain, dievaluasi, dan disimpan sebagai best model.">
+        <defs>
+          <marker id="arw2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+          <marker id="arwa2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk-a" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <g id="f2">
+          <text class="z" x="150" y="24">PELATIHAN, TUNING, DAN PENYIMPANAN</text>
+
+          <rect class="bx" x="150" y="40" width="560" height="72" rx="9"/>
+          <text class="bt" x="168" y="64">Model CNN + LSTM</text>
+          <text class="bm" x="168" y="86">2 &times; Conv1d &rarr; 3 &times; LSTM &rarr; classifier</text>
+          <text class="bm" x="168" y="104">keluaran diambil dari timestep terakhir</text>
+
+          <path class="ed" d="M430,112 V140"/>
+
+          <rect class="bx" x="150" y="142" width="560" height="124" rx="9"/>
+          <text class="bt" x="168" y="166">Training loop</text>
+          <text class="bm" x="168" y="190">150 epoch &middot; Adam lr 1e-4 &middot; weight decay 1e-4</text>
+          <text class="bm" x="168" y="210">CrossEntropyLoss &middot; dropout 0.2 di tiap blok</text>
+          <text class="bm" x="168" y="230">early stop: patience 15 epoch, monitor dev_loss</text>
+          <text class="bm" x="168" y="250">state_dict dengan dev_loss terbaik dipulihkan</text>
+
+          <path class="ed-d" d="M710,168 H758 V236 H710"/>
+          <text class="bn" x="764" y="206">epoch</text>
+          <text class="bn" x="764" y="222">berikutnya</text>
+
+          <path class="ed" d="M430,266 V294"/>
+
+          <rect class="bx" x="150" y="296" width="560" height="82" rx="9"/>
+          <text class="bt" x="168" y="320">Evaluasi di test set</text>
+          <text class="bm" x="168" y="342">test loss &amp; accuracy &middot; classification_report</text>
+          <text class="bm" x="168" y="362">confusion matrix &middot; dipakai sekali di akhir</text>
+
+          <path class="ed" d="M430,378 V406"/>
+
+          <rect class="bx" x="150" y="408" width="560" height="62" rx="9"/>
+          <text class="bt" x="168" y="432">Simpan base model</text>
+          <text class="bm" x="168" y="454">base_model/model_cnn_lstm_isyarat.pt</text>
+
+          <path class="ed" d="M430,470 V506"/>
+
+          <rect class="bx-h" x="150" y="508" width="560" height="96" rx="9"/>
+          <text class="bt-h" x="168" y="532">Random search &mdash; 100 trial</text>
+          <text class="bm" x="168" y="554">8 hyperparameter diacak tiap trial</text>
+          <text class="bm" x="168" y="574">100 epoch per trial &middot; skor = dev_accuracy terbaik</text>
+
+          <path class="ed-d" d="M710,540 H738"/>
+          <text class="bn-h" x="744" y="540">100 trial &times; 100 epoch</text>
+          <text class="bn" x="744" y="558">= 10.000 epoch, dan</text>
+          <text class="bn" x="744" y="574">tiap trial dilatih</text>
+          <text class="bn" x="744" y="590">dari nol</text>
+
+          <path class="ed" d="M430,604 V632"/>
+
+          <rect class="bx-h" x="150" y="634" width="560" height="62" rx="9"/>
+          <text class="bt-h" x="168" y="658">Retrain dengan config terbaik</text>
+          <text class="bm" x="168" y="680">150 epoch + early stopping, seed sama</text>
+
+          <path class="ed" d="M430,696 V724"/>
+
+          <rect class="bx-h" x="150" y="726" width="560" height="62" rx="9"/>
+          <text class="bt-h" x="168" y="750">Evaluasi tuned model</text>
+          <text class="bm" x="168" y="772">test loss &amp; accuracy &middot; confusion matrix</text>
+
+          <path class="ed" d="M430,788 V816"/>
+
+          <rect class="bx-h" x="150" y="818" width="560" height="62" rx="9"/>
+          <text class="bt-h" x="168" y="842">Simpan best model</text>
+          <text class="bm" x="168" y="864">best_model/model_cnn_lstm_isyarat.pt</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      <b>Dua tahap, dua checkpoint.</b> Model dasar dilatih, dievaluasi, lalu disimpan.颇具
+      <b>random search 100 trial</b> berjalan sebagai tahap terpisah (kotak hangat) &mdash; tiap trial
+      dilatih dari nol, lalu konfigurasi terbaik dilatih ulang sekali lagi dan barulah disimpan sebagai
+      best model.
+    </figcaption>
+  </figure>
+
+  <figure>
+    <div class="fig-scroll tight">
+      <svg viewBox="0 0 900 240" role="img" aria-label="Diagram arsitektur model: input 90 frame times 126 fitur melewati dua blok convolutional, tiga lapis LSTM, dan classifier, menghasilkan logits satu per video dari timestep terakhir.">
+        <defs>
+          <marker id="arw3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="mk-a" d="M0,0 L10,5 L0,10 z"/>
+          </marker>
+        </defs>
+
+        <g id="f3">
+          <text class="z" x="25" y="24">ARSITEKTUR DAN BENTUK TENSOR</text>
+          <text class="bm" x="295" y="30">transpose &rarr; (B, 126, 90)</text>
+
+          <rect class="bx" x="25" y="40" width="140" height="104" rx="9"/>
+          <text class="bt" x="41" y="66">Input</text>
+          <text class="bm" x="41" y="88">90 frame</text>
+          <text class="bm" x="41" y="108">&times; 126 fitur</text>
+          <text class="bo" x="41" y="130">&rarr; (B, 90, 126)</text>
+
+          <path class="ed-a" d="M165,92 H193"/>
+
+          <rect class="bx" x="195" y="40" width="200" height="104" rx="9"/>
+          <text class="bt" x="211" y="66">Blok CNN</text>
+          <text class="bm" x="211" y="88">Conv1d 126&rarr;64 &middot; ReLU</text>
+          <text class="bm" x="211" y="108">MaxPool(2) &middot; Dropout 0.2</text>
+          <text class="bo" x="211" y="130">&rarr; (B, 23, 64)</text>
+
+          <path class="ed-a" d="M395,92 H423"/>
+
+          <rect class="bx" x="425" y="40" width="230" height="104" rx="9"/>
+          <text class="bt" x="441" y="66">LSTM bertumpuk</text>
+          <text class="bm" x="441" y="88">LSTM 64 &rarr; LSTM 64 &rarr; LSTM 64</text>
+          <text class="bm" x="441" y="108">+ Dropout &amp; ReLU di antaranya</text>
+          <text class="bo" x="441" y="130">&rarr; (B, 23, 64)</text>
+
+          <path class="ed-a" d="M655,92 H683"/>
+
+          <rect class="bx" x="685" y="40" width="190" height="104" rx="9"/>
+          <text class="bt" x="701" y="66">Classifier</text>
+          <text class="bm" x="701" y="88">Linear 64&rarr;64 &middot; Dropout</text>
+          <text class="bm" x="701" y="108">Linear 64&rarr;32 &middot; 32&rarr;K</text>
+          <text class="bo" x="701" y="130">&rarr; (B, K)</text>
+
+          <path class="ed-a" d="M780,144 V166"/>
+          <rect class="bx-d" x="580" y="168" width="295" height="52" rx="9"/>
+          <text class="bs" x="596" y="190">Kelas diambil dari timestep terakhir</text>
+          <text class="bm" x="596" y="210">features[:, -1] &rarr; 1 prediksi per video</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>
+      <b>Bentuk tensor.</b> Satu video masuk sebagai 90 frame &times; 126 fitur. CNN memendekkan
+      urutan waktu dari 90 ke 23 langkah, tiga lapis LSTM menjaga konteks temporal, dan
+      <b>setiap video menghasilkan tepat satu logits</b> karena hanya timestep terakhir yang diambil.
+    </figcaption>
+  </figure>
+
+  <h2>Konfigurasi</h2>
+  <hr class="rule">
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>Parameter</th><th>Nilai</th><th>Fungsi</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">VIDEO_FRAMES</td><td class="mono">90</td><td>Panjang tetap setiap video setelah resample</td></tr>
+        <tr><td class="mono">FEATURES</td><td class="mono">126</td><td>2 tangan &times; 21 landmark &times; 3 koordinat</td></tr>
+        <tr><td class="mono">BATCH_SIZE</td><td class="mono">32</td><td>Ukuran batch DataLoader</td></tr>
+        <tr><td class="mono">EPOCHS</td><td class="mono">150</td><td>Batas epoch pada training dan retrain</td></tr>
+        <tr><td class="mono">PATIENCE</td><td class="mono">15</td><td>Early stopping, monitor dev_loss</td></tr>
+        <tr><td class="mono">SEED</td><td class="mono">42</td><td>random, numpy, dan torch disetel sama</td></tr>
+        <tr><td class="mono">MAX_TRIALS</td><td class="mono">100</td><td>Jumlah trial random search</td></tr>
+        <tr><td class="mono">TUNING_EPOCHS</td><td class="mono">100</td><td>Epoch per trial tuning</td></tr>
+        <tr><td class="mono">learning_rate</td><td class="mono">1e-4</td><td>Adam, sama untuk base dan tuning</td></tr>
+        <tr><td class="mono">weight_decay</td><td class="mono">1e-4</td><td>Regularisasi optimizer</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Keluaran notebook</h2>
+  <hr class="rule">
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th>File</th><th>Isi checkpoint</th><th>Dipakai saat</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>base_model/model_cnn_lstm_isyarat.pt</code></td>
+          <td>state_dict, model_config, actions, video_frames, features</td>
+          <td>Model sebelum tuning</td>
+        </tr>
+        <tr>
+          <td><code>best_model/model_cnn_lstm_isyarat.pt</code></td>
+          <td>state_dict, model_config hasil pencarian, actions, video_frames, features</td>
+          <td>Model akhir, dipakai deteksi real-time</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Catatan teknis</h2>
+  <hr class="rule">
+  <div class="notes">
+    <div class="note flag">
+      <h3>Augmentasi berjalan sebelum split</h3>
+      <p>Sembilan versi dari satu file yang sama masuk ke <code>train_test_split</code> sebagai sampel
+      bebas. Sebagian bisa jatuh di train dan sebagian di test, sehingga skor testset terlalu optimistis.
+      Menutup celah ini berarti memindahkan augmentasi ke dalam loop training, sehingga
+      hanya <code>train_loader</code> yang diaugmentasi.</p>
+    </div>
+    <div class="note flag">
+      <h3>Skor trial tuning bukan model yang dipertahankan</h3>
+      <p>Tiap trial diranking dengan <code>max(dev_accuracy)</code> sepanjang epoch, sementara bobot yang
+      disimpan <code>fit_model</code> adalah epoch dengan <code>dev_loss</code> terbaik. Dua hal ini bisa
+      menunjuk epoch berbeda, sehingga dev accuracy yang dilaporkan tidak selalu milik model yang
+      akan dipakai.</p>
+    </div>
+    <div class="note">
+      <h3>Jalur dataset dikunci ke satu mesin</h3>
+      <p><code>PROJECT_DIR</code> menunjuk ke <code>/home/raddief/Project/Despro/Despro-BIDISGN</code>.
+      Notebook berhenti di cell 16 dengan <code>FileNotFoundError</code> di mesin lain.</p>
+    </div>
+    <div class="note">
+      <h3>Normalisasi harus sama dengan runtime</h3>
+      <p>Notebook menormalisasi per frame (kurangi wrist, bagi max-norm per frame) dan
+      <code>realtime_detection.py</code> menerapkan rumus yang sama per frame. Yang berbeda adalah asal
+      90 frame: notebook me-resample setiap video ke 90 frame, sedangkan runtime mengandalkan
+      <code>deque(maxlen=90)</code> yang terisi penuh secara alami.</p>
+    </div>
+  </div>
+
+  <footer>
+    Sumber: <code>Prototipe kode versi pytorch/train_cnn_lstm_pytorch.ipynb</code> &mdash; sel 16&ndash;46.
+    Normalisasi runtime dibandingkan dengan <code>realtime_detection.py</code> di repo yang sama.
+  </footer>
+
+</div>
