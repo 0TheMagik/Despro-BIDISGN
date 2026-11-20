@@ -17,13 +17,14 @@ RUN apt-get update \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Salin requirements.txt langsung dari folder yang sama
-COPY requirements.txt .
+# Salin file dari repo (build context = root repo, lihat docker-compose.yml)
+COPY Deployment/handlandmarker/requirements.txt .
 
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt
 
-# Salin kode aplikasi
-COPY app.py .
+# Salin kode aplikasi + model hand landmarker
+COPY Deployment/handlandmarker/app.py .
+COPY handlandmarker/hand_landmarker.task /app/hand_landmarker.task
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

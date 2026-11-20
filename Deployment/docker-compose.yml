@@ -5,10 +5,17 @@ services:
       dockerfile: Deployment/handlandmarker/Dockerfile
     ports:
       - "8001:8080"
+    restart: unless-stopped
 
   model:
     build:
       context: ..
       dockerfile: Deployment/model/Dockerfile
+    environment:
+      # Model terbaru: 97 kelas (A-Z + kata), PyTorch.
+      MODEL_PATH: /app/model/deployment_model/model_cnn_lstm_isyarat.pt
+      NORMALIZE_SEQUENCE: "1"
+      OMP_NUM_THREADS: "4"
     ports:
       - "8002:8080"
+    restart: unless-stopped
