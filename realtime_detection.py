@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 # Paksa eksekusi di CPU dengan menonaktifkan GPU CUDA Visibility
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+#os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import mediapipe as mp
 import torch
@@ -12,18 +12,24 @@ from collections import deque
 import threading
 import time
 
-# Setup PyTorch CPU
-device = torch.device("cpu")
-print("Menjalankan model PyTorch menggunakan CPU.")
+# Setup PyTorch 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Menjalankan model PyTorch menggunakan {device}.")
 
-# 1. Setup Class Labels berdasarkan folder dataset (48 classes dari training)
+# 1. Setup Class Labels berdasarkan folder dataset (88 classes dari training terbaru)
 # Di-load dari model checkpoint, default fallback berikut sebagai cadangan
 DEFAULT_ACTIONS = np.array([
-    'A', 'Aku', 'Anda', 'Apa', 'B', 'Baik', 'Berapa', 'Bodoh', 'C', 'D',
-    'Darimana', 'Dimana', 'E', 'F', 'G', 'H', 'Hallo', 'I', 'J', 'K',
-    'Kalian', 'Kamu', 'Kemana', 'Kenapa', 'Kita', 'L', 'M', 'N', 'Nunggu',
-    'O', 'P', 'Pintar', 'Q', 'R', 'S', 'Saya', 'Semua', 'Siapa', 'Sombong',
-    'Sudah', 'T', 'Terima Kasih', 'U', 'V', 'W', 'X', 'Y', 'Z'
+    'A', 'Adik', 'Ajak', 'Aku', 'Anak', 'Anda', 'Apa', 'B', 'Baik', 'Bantu',
+    'Bapak', 'Bayi', 'Berapa', 'Bodoh', 'Boros', 'C', 'Cerewet', 'D',
+    'Darimana', 'Dimana', 'E', 'Egois', 'F', 'G', 'Ganteng', 'H', 'Hallo',
+    'Hari', 'Hati-hati', 'I', 'Ibu', 'Ingat', 'J', 'K', 'Kakak', 'Kakek',
+    'Kalian', 'Kamu', 'Kapan', 'Kemana', 'Kenapa', 'Keren', 'Kereta',
+    'Kerja', 'Kita', 'Kuliah', 'L', 'Lupa', 'M', 'Maaf', 'Mau', 'Mobil',
+    'Motor', 'N', 'Nakal', 'Nama', 'Nunggu', 'O', 'Om', 'P', 'Perkenalkan',
+    'Pintar', 'Q', 'R', 'Ramah', 'S', 'Sabar', 'Sama-sama', 'Saudara',
+    'Saya', 'Sederhana', 'Semua', 'Senang', 'Siapa', 'Sombong', 'Sudah',
+    'T', 'Terima Kasih', 'Tidak', 'Tidak Mau', 'Tolong', 'Tuli', 'U', 'V',
+    'W', 'X', 'Y', 'Z'
 ])
 
 # 2. Definisikan Arsitektur CNN + LSTM (sama dengan training)
