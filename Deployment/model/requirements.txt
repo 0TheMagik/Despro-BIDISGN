@@ -1,4 +1,7 @@
 fastapi>=0.116.0
 uvicorn[standard]>=0.35.0
 numpy>=2.4.6
-tensorflow>=2.21.0
+# Model terbaru (97 kelas: A-Z + kata) memakai PyTorch.
+torch>=2.4.0
+# TensorFlow hanya diperlukan bila MODEL_PATH menunjuk ke file .keras lama:
+# tensorflow>=2.21.0
