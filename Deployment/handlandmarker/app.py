@@ -1,93 +1,257 @@
-import cv2
-import numpy as np
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
+from __future__ import annotations
 
-app = FastAPI(title="HandLandmarker + AI Model API on Cloud Run")
+import atexit
+import base64
+import os
+import tempfile
+import threading
+from pathlib import Path
+
+os.environ.setdefault("EGL_PLATFORM", "surfaceless")
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+
+import cv2
+import mediapipe as mp
+import numpy as np
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+app = FastAPI(title="BISINDO Handlandmarker Service")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 1. Inisialisasi HandLandmarker saat container pertama kali menyala (Cold Start)
-base_options = python.BaseOptions(model_asset_path="hand_landmarker.task")
-options = vision.HandLandmarkerOptions(
-    base_options=base_options,
-    running_mode=vision.RunningMode.VIDEO, # Gunakan IMAGE agar stateless di Cloud
-    num_hands=1,
-    min_hand_detection_confidence=0.5
-)
-landmarker = vision.HandLandmarker.create_from_options(options)
+BaseOptions = mp.tasks.BaseOptions
+HandLandmarker = mp.tasks.vision.HandLandmarker
+HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
 
-# 2. Muat Model AI Anda di sini (contoh menggunakan Scikit-Learn / Keras / ONNX)
-# import joblib
-# ai_model = joblib.load("model_gestur.pkl")
+MODEL_PATH = Path(os.getenv("HAND_LANDMARKER_MODEL_PATH", "/app/hand_landmarker.task"))
+MAX_HANDS = 2
+MAX_FEATURES = 126
 
-def preprocess_landmarks(hand_landmarks) -> np.ndarray:
-    """Normalisasi 21 titik ke pusat WRIST (0,0,0) -> Vektor (1, 63)"""
-    coords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks], dtype=np.float32)
-    coords = coords - coords[0] # Translasi terhadap titik 0 (WRIST)
-    flat = coords.flatten()
-    max_val = np.max(np.abs(flat))
-    if max_val > 0:
-        flat = flat / max_val
-    return np.expand_dims(flat, axis=0)
+# Default 0.2 = sama dengan resep ekstraksi dataset pada docstring video_to_numpy.py.
+# Pastikan nilai ini sama dengan yang dipakai saat membuat file .npy dataset.
+HAND_DETECTION_CONFIDENCE = float(os.getenv("HAND_DETECTION_CONFIDENCE", "0.2"))
+HAND_PRESENCE_CONFIDENCE = float(os.getenv("HAND_PRESENCE_CONFIDENCE", "0.2"))
+HAND_TRACKING_CONFIDENCE = float(os.getenv("HAND_TRACKING_CONFIDENCE", "0.2"))
 
-def process_jpeg_bytes(jpeg_bytes: bytes) -> dict:
-    np_arr = np.frombuffer(jpeg_bytes, np.uint8)
-    bgr_frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-    if bgr_frame is None:
-        return {"detected": False, "error": "Invalid JPEG"}
 
-    rgb_frame = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2RGB)
-    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+def extract_keypoints(results) -> np.ndarray:
+    if results and getattr(results, "hand_landmarks", None):
+        landmarks_list = []
+        for hand in results.hand_landmarks[:MAX_HANDS]:
+            for landmark in hand:
+                landmarks_list.extend([landmark.x, landmark.y, landmark.z])
 
-    result = landmarker.detect(mp_image)
-    if not result.hand_landmarks:
-        return {"detected": False, "label": None}
+        arr = np.array(landmarks_list, dtype=np.float32)
+        if arr.shape[0] < MAX_FEATURES:
+            arr = np.concatenate([arr, np.zeros(MAX_FEATURES - arr.shape[0], dtype=np.float32)])
+        return arr[:MAX_FEATURES]
 
-    hand_lms = result.hand_landmarks[0]
-    
-    # 1. Fitur 63 dimensi yang sudah dinormalisasi untuk Model AI Anda
-    features_63 = preprocess_landmarks(hand_lms)
+    return np.zeros(MAX_FEATURES, dtype=np.float32)
 
-    # --- INFERENSI MODEL AI ANDA DI SINI ---
-    # pred_label = ai_model.predict(features_63)[0]
-    pred_label = "Gestur_Terdeteksi"
-    confidence = 0.98
 
-    # 2. Koordinat layar (x, y) [0.0 - 1.0] untuk digambar oleh aplikasi penguji di laptop
-    raw_points = [{"x": round(lm.x, 4), "y": round(lm.y, 4)} for lm in hand_lms]
+def build_landmarker():
+    if not MODEL_PATH.exists():
+        raise RuntimeError(f"HandLandmarker model not found at {MODEL_PATH}")
 
+    options = HandLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=str(MODEL_PATH)),
+        running_mode=VisionRunningMode.VIDEO,
+        num_hands=MAX_HANDS,
+        min_hand_detection_confidence=HAND_DETECTION_CONFIDENCE,
+        min_hand_presence_confidence=HAND_PRESENCE_CONFIDENCE,
+        min_tracking_confidence=HAND_TRACKING_CONFIDENCE,
+    )
+    return HandLandmarker.create_from_options(options)
+
+
+class SessionState:
+    """Satu HandLandmarker VIDEO-mode per sesi realtime."""
+
+    __slots__ = ("landmarker", "lock", "last_timestamp_ms")
+
+    def __init__(self) -> None:
+        self.landmarker = build_landmarker()
+        self.lock = threading.Lock()
+        self.last_timestamp_ms = 0
+
+    def close(self) -> None:
+        with self.lock:
+            try:
+                self.landmarker.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+
+
+_sessions: dict[str, SessionState] = {}
+_sessions_lock = threading.Lock()
+
+
+def get_or_create_session(session_id: str) -> SessionState:
+    with _sessions_lock:
+        state = _sessions.get(session_id)
+        if state is None:
+            state = SessionState()
+            _sessions[session_id] = state
+            print(f"[handlandmarker] session dibuat: {session_id}")
+        return state
+
+
+def discard_session(session_id: str) -> bool:
+    with _sessions_lock:
+        state = _sessions.pop(session_id, None)
+    if state is None:
+        return False
+    state.close()
+    print(f"[handlandmarker] session ditutup: {session_id}")
+    return True
+
+
+def close_all_sessions() -> None:
+    with _sessions_lock:
+        states = list(_sessions.values())
+        _sessions.clear()
+    for state in states:
+        state.close()
+
+
+atexit.register(close_all_sessions)
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/extract")
+async def extract(file: UploadFile = File(...), max_frames: int = 90):
+    if max_frames <= 0:
+        raise HTTPException(status_code=400, detail="max_frames must be greater than 0")
+
+    suffix = Path(file.filename or "upload.mp4").suffix or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_file.write(await file.read())
+        temp_path = Path(temp_file.name)
+
+    frames: list[list[float]] = []
+    active_frames = 0
+    cap = cv2.VideoCapture(str(temp_path))
+    if not cap.isOpened():
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Cannot open uploaded video")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if not fps or fps <= 0:
+        fps = 30.0
+
+    with build_landmarker() as landmarker:
+        idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+            frame_timestamp_ms = int((idx / fps) * 1000)
+            results = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
+            keypoints = extract_keypoints(results)
+            frames.append(keypoints.tolist())
+            if getattr(results, "hand_landmarks", None):
+                active_frames += 1
+            idx += 1
+
+            if len(frames) >= max_frames:
+                break
+
+    cap.release()
+    temp_path.unlink(missing_ok=True)
+
+    frame_count = len(frames)
     return {
-        "detected": True,
-        "label": pred_label,
-        "confidence": confidence,
-        "points": raw_points,          # Untuk visualisasi titik di layar laptop
-        "landmarks_63": features_63[0].tolist() # Untuk cek data yang masuk ke AI
+        "frame_count": frame_count,
+        "feature_size": MAX_FEATURES,
+        "active_frames": active_frames,
+        "active_ratio": (active_frames / frame_count) if frame_count else 0.0,
+        "keypoints": frames,
     }
 
-# Endpoint 1: HTTP POST (Cocok untuk pengujian atau pengiriman per-event)
-@app.post("/predict-image")
-async def predict_image(file: UploadFile = File(...)):
-    jpeg_bytes = await file.read()
-    return process_jpeg_bytes(jpeg_bytes)
 
-# Endpoint 2: WebSocket Binary (Cocok untuk real-time streaming dari ESP32-CAM / Web)
-@app.websocket("/ws/stream")
-async def websocket_stream(websocket: WebSocket):
-    await websocket.accept()
+class SessionStartRequest(BaseModel):
+    session_id: str
+
+
+class SessionFrameRequest(BaseModel):
+    session_id: str
+    frame_data: str
+    timestamp_ms: int
+    width: int | None = None
+    height: int | None = None
+
+
+class SessionEndRequest(BaseModel):
+    session_id: str
+
+
+def decode_frame(frame_data: str) -> np.ndarray:
+    if frame_data.lower().startswith("data:"):
+        frame_data = frame_data.split(",", 1)[-1]
     try:
-        while True:
-            # Terima byte JPEG mentah langsung dari ESP32-CAM / Browser
-            jpeg_bytes = await websocket.receive_bytes()
-            response = process_jpeg_bytes(jpeg_bytes)
-            await websocket.send_json(response)
-    except WebSocketDisconnect:
-        print("Client terputus dari Cloud Run.")
+        raw = base64.b64decode(frame_data, validate=False)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="frame_data bukan base64 yang valid") from exc
+
+    frame = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="frame_data tidak bisa didekode menjadi gambar")
+    return frame
+
+
+@app.post("/session/start")
+def session_start(request: SessionStartRequest):
+    get_or_create_session(request.session_id)
+    return {"session_id": request.session_id, "status": "started"}
+
+
+@app.post("/session/frame")
+def session_frame(request: SessionFrameRequest):
+    frame = decode_frame(request.frame_data)
+    state = get_or_create_session(request.session_id)
+
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+
+    with state.lock:
+        # detect_for_video() butuh timestamp yang selalu naik.
+        timestamp_ms = max(int(request.timestamp_ms), state.last_timestamp_ms + 1)
+        state.last_timestamp_ms = timestamp_ms
+        results = state.landmarker.detect_for_video(mp_image, timestamp_ms)
+
+    keypoints = extract_keypoints(results)
+    hand_count = min(len(results.hand_landmarks), MAX_HANDS) if getattr(results, "hand_landmarks", None) else 0
+
+    return {
+        "session_id": request.session_id,
+        "timestamp_ms": timestamp_ms,
+        "keypoints": keypoints.tolist(),
+        "hand_count": hand_count,
+        "active": hand_count > 0,
+        "width": int(frame.shape[1]),
+        "height": int(frame.shape[0]),
+    }
+
+
+@app.post("/session/end")
+def session_end(request: SessionEndRequest):
+    closed = discard_session(request.session_id)
+    return {"session_id": request.session_id, "closed": closed}
+

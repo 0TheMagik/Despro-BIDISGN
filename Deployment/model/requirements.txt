@@ -1,9 +1,7 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-websockets==13.0
-numpy==1.26.4
-pydantic==2.9.2
-
-# Gunakan PyTorch versi CPU untuk Cloud Run (agar image tidak bengkak)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
+fastapi>=0.116.0
+uvicorn[standard]>=0.35.0
+numpy>=2.4.6
+# Model terbaru (97 kelas: A-Z + kata) memakai PyTorch.
+torch>=2.4.0
+# TensorFlow hanya diperlukan bila MODEL_PATH menunjuk ke file .keras lama:
+# tensorflow>=2.21.0
