@@ -1,22 +1,53 @@
+# ============================================
 # Environment variables
+# ============================================
 .env
+.env.*
+!.env.example
 
-# virtual environment
-.venv/
+# ============================================
+# Python virtual environment
+# ============================================
+/.venv/
+/venv/
+/env/
 
-# Python / Jupyter Notebook
+# ============================================
+# Python / Jupyter
+# ============================================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*.so
+*.egg-info/
+/build/
+/dist/
 .ipynb_checkpoints/
 
-ptxas
-
+# ============================================
+# Dataset & media (local only, ukuran besar)
+# ============================================
+/dataset/
 *.npy
 *.mp4
-.claude/    
-Prompt.md
-dataset/
 
-.lilygo/
+# ============================================
+# LilyGO / PlatformIO firmware (local only, tidak dipublikasi)
+# ============================================
+/lilygo/
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# ============================================
+# Tooling / catatan lokal
+# ============================================
+/.claude/
+/Prompt.md
+
+# ============================================
+# Lain-lain
+# ============================================
+ptxas
+*.log
+.DS_Store
+Thumbs.db
