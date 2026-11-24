@@ -1,17 +1,15 @@
-"""Deteksi BISINDO realtime -> teks (model terbaru: 97 kelas A-Z + kata).
+"""Realtime BISINDO sign-to-text client.
 
-Alur:
-    frame kamera
-      -> landmark tangan (MediaPipe lokal ATAU service handlandmarker di Docker)
-      -> window keypoint (default 45 frame) -> POST /predict ke model service
-      -> voting + stabilisasi -> commit ke teks (huruf digabung, kata diberi spasi)
+Keep the input contract aligned with Deployment/model/app.py:
+- raw MediaPipe landmarks, 2 x 21 x (x, y, z) = 126 float features/frame
+- no mirroring or client-side normalization before POST /predict
+- service owns sequence resampling and wrist-relative normalization
 
-Contoh:
-    python realtime_detection_docker.py                 # backend landmark otomatis
-    python realtime_detection_docker.py --backend docker
-    python realtime_detection_docker.py --video rekaman.mp4 --show
+Run from repository root:
+    python Deployment/realtime_detection_docker.py
+    python Deployment/realtime_detection_docker.py --backend docker
+    python Deployment/realtime_detection_docker.py --video clip.mp4 --show
 """
-
 from __future__ import annotations
 
 import argparse
@@ -33,23 +31,18 @@ import requests
 
 try:
     from dotenv import load_dotenv
-except ImportError:
+except ImportError:  # dotenv is optional
     load_dotenv = None
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-
 if load_dotenv is not None:
     load_dotenv(dotenv_path=SCRIPT_DIR / ".env")
 
 FEATURES = 126
-
 HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),
-    (0, 5), (5, 6), (6, 7), (7, 8),
-    (5, 9), (9, 10), (10, 11), (11, 12),
-    (9, 13), (13, 14), (14, 15), (15, 16),
-    (13, 17), (17, 18), (18, 19), (19, 20),
-    (0, 17),
+    (0, 1), (1, 2), (2, 3), (3, 4), (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12), (9, 13), (13, 14), (14, 15),
+    (15, 16), (13, 17), (17, 18), (18, 19), (19, 20), (0, 17),
 ]
 
 
@@ -62,7 +55,8 @@ def env_int(name: str, default: int) -> int:
 
 def env_float(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        value = float(os.getenv(name, str(default)))
+        return value if np.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
@@ -78,18 +72,13 @@ def resolve_landmark_model_path() -> Path | None:
     candidates: list[Path] = []
     explicit = os.getenv("HAND_LANDMARKER_MODEL_PATH")
     if explicit:
-        candidates.append(Path(explicit))
-    candidates.extend(
-        [
-            SCRIPT_DIR / "handlandmarker" / "hand_landmarker.task",
-            SCRIPT_DIR.parent / "handlandmarker" / "hand_landmarker.task",
-            Path("handlandmarker/hand_landmarker.task"),
-        ]
-    )
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+        candidates.append(Path(explicit).expanduser())
+    candidates.extend((
+        SCRIPT_DIR / "handlandmarker" / "hand_landmarker.task",
+        SCRIPT_DIR.parent / "handlandmarker" / "hand_landmarker.task",
+        Path("handlandmarker/hand_landmarker.task"),
+    ))
+    return next((path for path in candidates if path.is_file()), None)
 
 
 @dataclass(frozen=True)
@@ -128,79 +117,60 @@ class Config:
 def load_config(args: argparse.Namespace) -> Config:
     window_frames = max(8, min(env_int("WINDOW_FRAMES", env_int("SEQ_LEN", 36)), 180))
     min_window_frames = max(4, min(env_int("MIN_WINDOW_FRAMES", min(24, window_frames)), window_frames))
-    stride_frames = max(1, env_int("STRIDE_FRAMES", env_int("PREDICT_EVERY_N_FRAMES", 3)))
-    threshold = min(0.999, max(0.5, env_float("PREDICTION_THRESHOLD", 0.95)))
-    top1_margin = min(0.95, max(0.0, env_float("TOP1_MARGIN", 0.20)))
-    vote_window = max(1, env_int("VOTE_WINDOW", 5))
-    stable_predictions = max(1, env_int("STABLE_PREDICTIONS", 5))
-    release_after_empty_frames = max(1, env_int("RELEASE_AFTER_EMPTY_FRAMES", 8))
-    min_active_ratio = min(0.95, max(0.0, env_float("MIN_ACTIVE_RATIO", 0.6)))
-    movement_threshold = max(0.0005, env_float("MOVEMENT_THRESHOLD", 0.012))
-    gesture_motion_threshold = max(movement_threshold, env_float("GESTURE_MOTION_THRESHOLD", 0.02))
-    stability_frames = max(1, env_int("STABILITY_FRAMES", 6))
-    gesture_timeout = max(0.5, env_float("GESTURE_TIMEOUT_SECONDS", 4.0))
-    min_hold_seconds = max(0.0, env_float("MIN_HOLD_SECONDS", 0.3))
-    commit_cooldown = max(0.0, env_float("COMMIT_COOLDOWN_SECONDS", 0.6))
-    require_stable_motion = env_bool("REQUIRE_STABLE_MOTION", True)
-    require_gesture = env_bool("REQUIRE_GESTURE", True)
-    show_status = env_bool("SHOW_STATUS", False)
-
-    landmark_model_path = resolve_landmark_model_path()
+    landmark_path = resolve_landmark_model_path()
     backend = (args.backend or os.getenv("LANDMARK_BACKEND", "auto")).strip().lower()
     if backend not in {"auto", "local", "docker"}:
         backend = "auto"
     if backend == "auto":
-        has_mediapipe = importlib.util.find_spec("mediapipe") is not None
-        backend = "local" if has_mediapipe and landmark_model_path is not None else "docker"
+        try:
+            backend = "local" if importlib.util.find_spec("mediapipe") and landmark_path else "docker"
+        except (ImportError, ValueError):
+            backend = "docker"
 
     return Config(
         handlandmarker_url=os.getenv("HANDLANDMARKER_URL", "http://localhost:8001").rstrip("/"),
-        model_url=os.getenv("MODEL_URL", "https://despro-bidisgn-model-1031455690132.asia-southeast2.run.app/").rstrip("/"),
+        model_url=os.getenv("MODEL_URL", "http://localhost:8002").rstrip("/"),
         landmark_backend=backend,
-        landmark_model_path=landmark_model_path,
+        landmark_model_path=landmark_path,
         window_frames=window_frames,
         min_window_frames=min_window_frames,
-        stride_frames=stride_frames,
-        prediction_threshold=threshold,
-        top1_margin=top1_margin,
-        vote_window=vote_window,
-        stable_predictions=stable_predictions,
-        release_after_empty_frames=release_after_empty_frames,
-        min_active_ratio=min_active_ratio,
-        movement_threshold=movement_threshold,
-        gesture_motion_threshold=gesture_motion_threshold,
-        stability_frames=stability_frames,
-        gesture_timeout=gesture_timeout,
-        min_hold_seconds=min_hold_seconds,
-        commit_cooldown=commit_cooldown,
-        require_stable_motion=require_stable_motion,
-        require_gesture=require_gesture,
+        stride_frames=max(1, env_int("STRIDE_FRAMES", env_int("PREDICT_EVERY_N_FRAMES", 3))),
+        prediction_threshold=float(np.clip(env_float("PREDICTION_THRESHOLD", 0.85), 0.0, 0.999)),
+        top1_margin=float(np.clip(env_float("TOP1_MARGIN", 0.12), 0.0, 0.95)),
+        vote_window=max(1, env_int("VOTE_WINDOW", 3)),
+        stable_predictions=max(1, env_int("STABLE_PREDICTIONS", 3)),
+        release_after_empty_frames=max(1, env_int("RELEASE_AFTER_EMPTY_FRAMES", 8)),
+        min_active_ratio=float(np.clip(env_float("MIN_ACTIVE_RATIO", 0.6), 0.0, 0.95)),
+        movement_threshold=max(0.0005, env_float("MOVEMENT_THRESHOLD", 0.012)),
+        gesture_motion_threshold=max(0.0005, env_float("GESTURE_MOTION_THRESHOLD", 0.02)),
+        stability_frames=max(1, env_int("STABILITY_FRAMES", 3)),
+        gesture_timeout=max(0.5, env_float("GESTURE_TIMEOUT_SECONDS", 4.0)),
+        min_hold_seconds=max(0.0, env_float("MIN_HOLD_SECONDS", 0.1)),
+        commit_cooldown=max(0.0, env_float("COMMIT_COOLDOWN_SECONDS", 0.3)),
+        # Motion-based suppression is opt-in: many signs are static and otherwise
+        # never produce a prediction. Consensus/confidence still suppress noise.
+        require_stable_motion=env_bool("REQUIRE_STABLE_MOTION", False),
+        require_gesture=env_bool("REQUIRE_GESTURE", False),
         capture_width=max(160, env_int("CAPTURE_WIDTH", 640)),
         capture_height=max(120, env_int("CAPTURE_HEIGHT", 480)),
         capture_fps=max(5, env_int("CAPTURE_FPS", 30)),
         camera_index=args.camera if args.camera is not None else env_int("CAMERA_INDEX", 0),
-        jpeg_quality=min(95, max(40, env_int("JPEG_QUALITY", 80))),
+        jpeg_quality=int(np.clip(env_int("JPEG_QUALITY", 80), 40, 95)),
         text_limit=max(40, env_int("TEXT_LIMIT", 160)),
-        show_status=show_status,
+        show_status=env_bool("SHOW_STATUS", False),
         debug=bool(args.debug or env_bool("DEBUG", False)),
     )
 
 
 def print_banner(cfg: Config) -> None:
     print("=" * 64)
-    print(" Deteksi BISINDO realtime -> teks (97 kelas: A-Z + kata)")
+    print(" BISINDO realtime -> teks | 97 kelas: A-Z + kata")
     print("=" * 64)
     print(f" Model service : {cfg.model_url}")
     print(f" Landmark      : {cfg.landmark_backend} ({cfg.landmark_model_path or 'service Docker'})")
     print(f" Window        : {cfg.min_window_frames}-{cfg.window_frames} frame, stride {cfg.stride_frames}")
-    print(
-        f" Filter teks   : conf>={cfg.prediction_threshold:.2f} | margin>={cfg.top1_margin:.2f} | "
-        f"konsensus {max(cfg.vote_window, cfg.stable_predictions)}x | tahan {cfg.min_hold_seconds:.1f}s"
-    )
-    print(
-        f" Gerak/stabil  : gerak>={cfg.gesture_motion_threshold:.3f} | diam<={cfg.movement_threshold:.3f} "
-        f"x{cfg.stability_frames} frame | cooldown {cfg.commit_cooldown:.1f}s"
-    )
+    print(f" Filter        : conf>={cfg.prediction_threshold:.2f}, margin>={cfg.top1_margin:.2f}, "
+          f"konsensus={max(cfg.vote_window, cfg.stable_predictions)}")
     print("=" * 64)
 
 
@@ -213,33 +183,33 @@ def make_http_session() -> requests.Session:
 
 
 class TimestampSource:
-    """Timestamp monoton naik untuk MediaPipe VIDEO mode."""
-
+    """Monotonic millisecond timestamps required by MediaPipe VIDEO mode."""
     def __init__(self) -> None:
-        self._last = 0
+        self._last = -1
 
     def next(self) -> int:
-        timestamp = int(time.perf_counter() * 1000)
-        if timestamp <= self._last:
-            timestamp = self._last + 1
-        self._last = timestamp
-        return timestamp
+        value = int(time.perf_counter() * 1000)
+        self._last = max(value, self._last + 1)
+        return self._last
 
 
 def extract_keypoints(results: Any) -> tuple[np.ndarray, int]:
     hands = getattr(results, "hand_landmarks", None) or []
-    if not hands:
-        return np.zeros(FEATURES, dtype=np.float32), 0
-
+    output = np.zeros(FEATURES, dtype=np.float32)
+    count = min(len(hands), 2)
+    if count == 0:
+        return output, 0
     values: list[float] = []
     for hand in hands[:2]:
         for landmark in hand:
             values.extend((landmark.x, landmark.y, landmark.z))
-
-    array = np.asarray(values, dtype=np.float32)
-    if array.size < FEATURES:
-        array = np.concatenate([array, np.zeros(FEATURES - array.size, dtype=np.float32)])
-    return array[:FEATURES], min(len(hands), 2)
+    values_array = np.asarray(values, dtype=np.float32)
+    if values_array.size > FEATURES:
+        values_array = values_array[:FEATURES]
+    output[:values_array.size] = values_array
+    if not np.isfinite(output).all():
+        return np.zeros(FEATURES, dtype=np.float32), 0
+    return output, count
 
 
 class LandmarkSource:
@@ -253,19 +223,16 @@ class LandmarkSource:
 
 
 class LocalLandmarks(LandmarkSource):
-    """MediaPipe langsung di proses ini: paling cepat (tanpa HTTP + tanpa encode JPEG)."""
-
+    """MediaPipe in-process; no JPEG encoding or per-frame HTTP call."""
     backend = "local"
 
     def __init__(self, model_path: Path | None) -> None:
         try:
             import mediapipe as mp
         except ImportError as exc:
-            raise RuntimeError("MediaPipe belum terpasang. Jalankan: pip install mediapipe") from exc
-
-        if model_path is None or not model_path.exists():
+            raise RuntimeError("MediaPipe belum terpasang. Install mediapipe atau gunakan --backend docker.") from exc
+        if model_path is None or not model_path.is_file():
             raise RuntimeError("File hand_landmarker.task tidak ditemukan")
-
         self._mp = mp
         options = mp.tasks.vision.HandLandmarkerOptions(
             base_options=mp.tasks.BaseOptions(model_asset_path=str(model_path)),
@@ -279,19 +246,18 @@ class LocalLandmarks(LandmarkSource):
         self._last_error_at = 0.0
 
     def process(self, frame: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray, int, Any]:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb_frame)
         try:
-            results = self._landmarker.detect_for_video(mp_image, int(timestamp_ms))
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+            result = self._landmarker.detect_for_video(image, int(timestamp_ms))
+            keypoints, count = extract_keypoints(result)
+            return keypoints, count, result
         except Exception as exc:
             now = time.perf_counter()
             if now - self._last_error_at > 2.0:
                 print(f"[WARNING] MediaPipe gagal memproses frame: {exc}")
                 self._last_error_at = now
             return np.zeros(FEATURES, dtype=np.float32), 0, None
-
-        keypoints, hand_count = extract_keypoints(results)
-        return keypoints, hand_count, results
 
     def close(self) -> None:
         try:
@@ -301,8 +267,7 @@ class LocalLandmarks(LandmarkSource):
 
 
 class DockerLandmarks(LandmarkSource):
-    """Landmark lewat service handlandmarker (Docker/Cloud Run)."""
-
+    """Landmarks via the existing handlandmarker /session API."""
     backend = "docker"
 
     def __init__(self, base_url: str, session_id: str, jpeg_quality: int, timeout: float = 15.0) -> None:
@@ -311,73 +276,67 @@ class DockerLandmarks(LandmarkSource):
         self.jpeg_quality = jpeg_quality
         self.timeout = timeout
         self.session = make_http_session()
+        self._started = False
         self._last_error_at = 0.0
 
     def start(self) -> None:
         try:
-            response = self.session.post(
-                f"{self.url}/session/start",
-                json={"session_id": self.session_id},
-                timeout=10,
-            )
+            response = self.session.post(f"{self.url}/session/start", json={"session_id": self.session_id}, timeout=10)
             response.raise_for_status()
+            self._started = True
         except Exception as exc:
-            raise RuntimeError(
-                f"Service handlandmarker tidak dapat dihubungi di {self.url}: {exc}\n"
-                "  Jalankan: docker compose -f Deployment/docker-compose.yml up --build"
-            ) from exc
+            raise RuntimeError(f"Service handlandmarker tidak dapat dihubungi di {self.url}: {exc}\n"
+                               "Jalankan: docker compose -f Deployment/docker-compose.yml up --build") from exc
 
     def process(self, frame: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray, int, Any]:
         ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
         if not ok:
             return np.zeros(FEATURES, dtype=np.float32), 0, None
-
         payload = {
             "session_id": self.session_id,
-            "frame_data": base64.b64encode(buffer).decode("utf-8"),
+            "frame_data": base64.b64encode(buffer).decode("ascii"),
             "timestamp_ms": int(timestamp_ms),
             "width": int(frame.shape[1]),
             "height": int(frame.shape[0]),
         }
-
         try:
             response = self.session.post(f"{self.url}/session/frame", json=payload, timeout=self.timeout)
             response.raise_for_status()
             data = response.json()
+            points = np.asarray(data.get("keypoints", []), dtype=np.float32).reshape(-1)
+            if points.size != FEATURES:
+                raise ValueError(f"Expected {FEATURES} features, received {points.size}")
+            if not np.isfinite(points).all():
+                raise ValueError("Handlandmarker returned NaN/Inf keypoints")
+            count = int(data.get("hand_count", int(np.abs(points).sum() > 1e-6)))
+            return points, max(0, min(count, 2)), None
         except Exception as exc:
             now = time.perf_counter()
             if now - self._last_error_at > 2.0:
-                print(f"[WARNING] Gagal mengirim frame ke handlandmarker: {exc}")
+                print(f"[WARNING] Gagal memproses frame di handlandmarker: {exc}")
                 self._last_error_at = now
             return np.zeros(FEATURES, dtype=np.float32), 0, None
 
-        keypoints = np.asarray(data.get("keypoints") or [], dtype=np.float32)
-        if keypoints.size < FEATURES:
-            keypoints = np.concatenate([keypoints, np.zeros(FEATURES - keypoints.size, dtype=np.float32)])
-        keypoints = keypoints[:FEATURES]
-        hand_count = int(data.get("hand_count", 1 if float(np.abs(keypoints).sum()) > 0 else 0))
-        return keypoints, hand_count, None
-
     def close(self) -> None:
         try:
-            self.session.post(
-                f"{self.url}/session/end",
-                json={"session_id": self.session_id},
-                timeout=5,
-            )
+            if self._started:
+                self.session.post(f"{self.url}/session/end", json={"session_id": self.session_id}, timeout=5)
         except Exception:
             pass
+        finally:
+            self.session.close()
 
 
 def create_landmarker(cfg: Config, session_id: str) -> LandmarkSource:
-    if cfg.landmark_backend == "local":
+    if cfg.landmark_backend in {"auto", "local"}:
         try:
             source = LocalLandmarks(cfg.landmark_model_path)
             print(f"[LANDMARK] MediaPipe lokal: {cfg.landmark_model_path}")
             return source
         except Exception as exc:
-            print(f"[WARNING] Landmark lokal gagal ({exc}); memakai service Docker.")
-
+            if cfg.landmark_backend == "local":
+                raise RuntimeError(f"Backend landmark lokal gagal: {exc}") from exc
+            print(f"[WARNING] Backend lokal tidak tersedia ({exc}); fallback ke service.")
     source = DockerLandmarks(cfg.handlandmarker_url, session_id, cfg.jpeg_quality)
     source.start()
     print(f"[LANDMARK] Service Docker: {cfg.handlandmarker_url}")
@@ -397,86 +356,74 @@ class ModelClient:
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                health = self.session.get(f"{self.url}/health", timeout=5)
-                health.raise_for_status()
-                self.info = health.json()
-                try:
-                    labels_response = self.session.get(f"{self.url}/labels", timeout=5)
-                    if labels_response.ok:
-                        payload = labels_response.json()
-                        self.labels = [str(label) for label in payload.get("labels", [])]
-                        self.seq_len = int(payload.get("seq_len", self.seq_len))
-                        self.features = int(payload.get("features", self.features))
-                except Exception:
-                    pass
+                response = self.session.get(f"{self.url}/health", timeout=5)
+                response.raise_for_status()
+                self.info = response.json()
+                if self.info.get("status") not in {None, "ok"}:
+                    raise RuntimeError(f"Model belum siap: {self.info.get('status')}")
+                labels_response = self.session.get(f"{self.url}/labels", timeout=5)
+                labels_response.raise_for_status()
+                metadata = labels_response.json()
+                self.labels = [str(label) for label in metadata.get("labels", [])]
+                self.seq_len = int(metadata.get("seq_len", self.seq_len))
+                self.features = int(metadata.get("features", self.features))
+                if self.features != FEATURES:
+                    raise RuntimeError(f"Model mengharapkan {self.features} fitur, client menghasilkan {FEATURES}")
+                if self.seq_len <= 0:
+                    raise RuntimeError(f"Model mengembalikan seq_len tidak valid: {self.seq_len}")
+                self.info.update(metadata)
                 return self.info
             except Exception as exc:
                 last_error = exc
                 if attempt < attempts:
                     print(f"[INFO] Menunggu model service siap ({attempt}/{attempts}) ...")
                     time.sleep(delay)
-
-        raise RuntimeError(
-            f"Model service tidak dapat dihubungi di {self.url}.\n"
-            "  Jalankan: docker compose -f Deployment/docker-compose.yml up --build\n"
-            f"  Detail: {last_error}"
-        )
+        raise RuntimeError(f"Model service tidak siap di {self.url}. Detail: {last_error}")
 
     def predict(self, sequence: np.ndarray) -> dict[str, Any]:
-        payload = {"instances": [np.round(sequence, 5).tolist()]}
-        response = self.session.post(f"{self.url}/predict", json=payload, timeout=15)
+        values = np.asarray(sequence, dtype=np.float32)
+        if values.ndim != 2 or values.shape[0] < 1 or values.shape[1] != self.features:
+            raise ValueError(f"Sequence harus [frames, {self.features}], diterima {values.shape}")
+        if not np.isfinite(values).all():
+            raise ValueError("Sequence berisi NaN atau Inf")
+        response = self.session.post(f"{self.url}/predict", json={"instances": [values.tolist()]}, timeout=20)
         response.raise_for_status()
         predictions = response.json().get("predictions") or []
         if not predictions:
             raise RuntimeError("Response /predict kosong")
-        return predictions[0]
+        prediction = predictions[0]
+        if not isinstance(prediction, dict) or "label" not in prediction:
+            raise RuntimeError("Format response /predict tidak valid")
+        return prediction
+
+    def close(self) -> None:
+        self.session.close()
 
 
 def print_service_info(client: ModelClient) -> None:
-    info = client.info
-    print(
-        f"[MODEL] {client.url} | backend={info.get('backend', '?')} | "
-        f"kelas={info.get('num_classes', len(client.labels) or '?')} | "
-        f"seq_len={info.get('seq_len', client.seq_len)} | "
-        f"normalize={info.get('normalize', '?')}"
-    )
+    print(f"[MODEL] {client.url} | backend={client.info.get('backend', '?')} | "
+          f"kelas={client.info.get('num_classes', len(client.labels) or '?')} | "
+          f"seq_len={client.seq_len} | features={client.features} | normalize={client.info.get('normalize', '?')}")
     if client.labels:
-        preview = ", ".join(client.labels[:12])
-        suffix = ", ..." if len(client.labels) > 12 else ""
-        print(f"[MODEL] label: {preview}{suffix}")
-
-    if not client.labels:
-        print(
-            "[PERINGATAN] Service model tidak mengirim daftar label (/labels tidak tersedia).\n"
-            "            Kemungkinan container masih image lama yang hanya punya 10 kelas,\n"
-            "            sehingga huruf A-Z tidak akan pernah terdeteksi.\n"
-            "            Jalankan: docker compose -f Deployment/docker-compose.yml up --build -d"
-        )
-    elif "A" not in client.labels or len(client.labels) < 26:
-        print(
-            f"[PERINGATAN] Model service hanya punya {len(client.labels)} kelas dan tidak memuat abjad A-Z.\n"
-            "            Pastikan image model sudah di-rebuild dengan model terbaru yang memuat abjad A-Z."
-        )
+        print(f"[MODEL] label ({len(client.labels)}): {', '.join(client.labels[:12])}"
+              f"{', ...' if len(client.labels) > 12 else ''}")
+        if client.info.get("num_classes") not in (None, len(client.labels)):
+            raise RuntimeError("Metadata model tidak konsisten: num_classes berbeda dari jumlah labels")
+        if "A" not in client.labels or len(client.labels) < 26:
+            print("[WARNING] Label service tidak memuat seluruh abjad A-Z.")
+    else:
+        raise RuntimeError("Endpoint /labels tidak mengembalikan labels; urutan kelas tidak dapat diverifikasi")
 
 
 class SignTextDecoder:
-    """Menyimpan window keypoint, filter gestur, konsensus prediksi, dan menyusun teks.
-
-    Teks hanya dikomit bila SEMUA syarat berikut terpenuhi:
-    1. Tangan diam/stabil sesaat (mode wajib gerakan bisa diaktifkan lewat env).
-    2. Confidence >= threshold dan margin top-1 vs top-2 cukup besar.
-    3. Label konsisten untuk beberapa prediksi berturut-turut (konsensus).
-    4. Cooldown antar-komit sudah lewat dan label belum sedang "dipegang".
-    """
-
+    """Temporal consensus and text assembly, without blocking inference on motion."""
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self.window: deque[np.ndarray] = deque(maxlen=cfg.window_frames)
         self.required_votes = max(cfg.vote_window, cfg.stable_predictions)
         self.history: deque[tuple[str, float]] = deque(maxlen=self.required_votes)
-
-        self.frames_since_predict = cfg.stride_frames
+        self.frames_since_predict = 0
         self.prev_frame: np.ndarray | None = None
         self.motion = 0.0
         self.motion_history: deque[bool] = deque(maxlen=cfg.stability_frames)
@@ -487,9 +434,7 @@ class SignTextDecoder:
         self.last_commit_at = 0.0
         self.empty_frames = 0
         self.active_ratio = 0.0
-
         self.hold_label: str | None = None
-
         self.raw_label = "-"
         self.raw_confidence = 0.0
         self.raw_margin = 0.0
@@ -498,39 +443,27 @@ class SignTextDecoder:
         self.top_k: list[tuple[str, float]] = []
         self.latency_ms = 0.0
         self.last_error: str | None = None
-        self.status = "menunggu gerakan"
-
+        self.status = "menunggu tangan"
         self.text = ""
         self.commit_count = 0
         self.last_commit_label: str | None = None
 
     def push(self, keypoints: np.ndarray, hand_count: int) -> np.ndarray | None:
         frame = np.asarray(keypoints, dtype=np.float32).reshape(-1)
-        if frame.size < FEATURES:
-            frame = np.concatenate([frame, np.zeros(FEATURES - frame.size, dtype=np.float32)])
-        frame = frame[:FEATURES]
-
-        previous = self.prev_frame
-        self.prev_frame = frame.copy()
-        timestamp = time.monotonic()
-
-        motion: float | None = None
-        if (
-            previous is not None
-            and hand_count > 0
-            and float(np.abs(frame).sum()) > 1e-6
-            and float(np.abs(previous).sum()) > 1e-6
-        ):
-            motion = float(np.abs(frame - previous).mean())
-
+        if frame.size != FEATURES:
+            raise ValueError(f"Expected {FEATURES} keypoints, received {frame.size}")
+        if not np.isfinite(frame).all():
+            frame = np.zeros(FEATURES, dtype=np.float32)
+            hand_count = 0
+        frame = frame.copy()
+        active = hand_count > 0 and float(np.abs(frame).sum()) > 1e-6
+        now = time.monotonic()
         with self._lock:
             self.window.append(frame)
             self.frames_since_predict += 1
-            self.motion = 0.0 if motion is None else motion
-            if motion is None:
-                self.stable_since = None
-
-            if hand_count <= 0:
+            previous = self.prev_frame
+            self.prev_frame = frame if active else None
+            if not active:
                 self.empty_frames += 1
                 self.is_stable = False
                 self.gesture_active = False
@@ -539,171 +472,111 @@ class SignTextDecoder:
                 self.history.clear()
                 self.status = "tidak ada tangan"
                 if self.empty_frames >= self.cfg.release_after_empty_frames:
-                    self._release_hold_locked()
+                    self.hold_label = None
             else:
                 self.empty_frames = 0
-
-            if hand_count > 0 and motion is not None:
+                motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
+                self.motion = motion
                 if motion >= self.cfg.gesture_motion_threshold:
-                    # Gerakan terdeteksi -> mulai sesi gestur baru, buang konsensus lama.
                     self.gesture_active = True
-                    self.last_motion_at = timestamp
-                    self.is_stable = False
-                    self.stable_since = None
-                    self.motion_history.clear()
+                    self.last_motion_at = now
                     self.history.clear()
-                    self.status = "gerakan terdeteksi"
+                    self.motion_history.clear()
+                    self.stable_since = None
+                self.motion_history.append(motion <= self.cfg.movement_threshold)
+                self.is_stable = len(self.motion_history) == self.cfg.stability_frames and all(self.motion_history)
+                if self.is_stable:
+                    if self.stable_since is None:
+                        self.stable_since = now
                 else:
-                    self.motion_history.append(motion <= self.cfg.movement_threshold)
-                    self.is_stable = (
-                        len(self.motion_history) >= self.cfg.stability_frames
-                        and all(self.motion_history)
-                    )
-                    if self.is_stable:
-                        if self.stable_since is None:
-                            self.stable_since = timestamp
-                    else:
-                        self.stable_since = None
+                    self.stable_since = None
+                self.status = "tangan stabil" if self.is_stable else "mendeteksi gesture"
 
-                    if self.is_stable and self.gesture_active:
-                        if (
-                            self.cfg.require_gesture
-                            and timestamp - self.last_motion_at > self.cfg.gesture_timeout
-                        ):
-                            self.gesture_active = False
-                            self.history.clear()
-                            self.status = "gestur kadaluarsa"
-                        elif not self.history:
-                            self.status = "tahan gestur..."
-                    elif not self.is_stable:
-                        self.status = "menunggu tangan diam"
-
-            window_len = len(self.window)
-            if window_len < self.cfg.min_window_frames:
+            if len(self.window) < self.cfg.min_window_frames or self.frames_since_predict < self.cfg.stride_frames:
                 return None
-
-            active_frames = sum(1 for item in self.window if float(np.abs(item).sum()) > 1e-6)
-            self.active_ratio = active_frames / window_len
+            active_count = sum(float(np.abs(item).sum()) > 1e-6 for item in self.window)
+            self.active_ratio = active_count / len(self.window)
             if self.active_ratio < self.cfg.min_active_ratio:
                 self.history.clear()
                 self.status = "tangan kurang terlihat"
                 return None
-            if self.frames_since_predict < self.cfg.stride_frames:
-                return None
-            if self.cfg.require_gesture and not self.gesture_active:
-                self.status = "menunggu gerakan"
-                return None
-            if self.cfg.require_stable_motion and not self.is_stable:
-                self.status = "menunggu stabil"
-                return None
-
+            # We always infer on a visible sliding window. Requiring movement or
+            # perfect stillness here causes static signs / continuous signs to vanish.
             self.frames_since_predict = 0
-            return np.array(self.window, dtype=np.float32, copy=True)
+            return np.stack(tuple(self.window)).astype(np.float32, copy=False)
 
     def register_prediction(self, prediction: dict[str, Any], latency_ms: float) -> None:
-        raw_label = str(prediction.get("label", "-"))
-        confidence = float(prediction.get("confidence", 0.0) or 0.0)
-        top_k = [
-            (str(item.get("label", "?")), float(item.get("confidence", 0.0) or 0.0))
-            for item in (prediction.get("top_k") or [])[:5]
-        ]
-        runner_up = top_k[1][1] if len(top_k) > 1 else 0.0
-        margin = confidence - runner_up
-        timestamp = time.monotonic()
-
+        raw_label = str(prediction.get("label", "-")).strip()
+        try:
+            confidence = float(prediction.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not np.isfinite(confidence):
+            confidence = 0.0
+        confidence = float(np.clip(confidence, 0.0, 1.0))
+        top_k: list[tuple[str, float]] = []
+        for item in (prediction.get("top_k") or [])[:5]:
+            try:
+                score = float(item.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if np.isfinite(score):
+                top_k.append((str(item.get("label", "?")), float(np.clip(score, 0.0, 1.0))))
+        margin = confidence - (top_k[1][1] if len(top_k) > 1 else 0.0)
+        now = time.monotonic()
         with self._lock:
-            self.raw_label = raw_label
-            self.raw_confidence = confidence
-            self.raw_margin = margin
-            self.top_k = top_k
-            self.latency_ms = latency_ms
-            self.last_error = None
-
-            if prediction.get("empty") or raw_label == "-":
+            self.raw_label, self.raw_confidence, self.raw_margin = raw_label or "-", confidence, margin
+            self.top_k, self.latency_ms, self.last_error = top_k, latency_ms, None
+            if prediction.get("empty") or raw_label in {"", "-"}:
                 self.history.clear()
-                self.status = "tidak ada gestur"
+                self.smoothed_label, self.smoothed_confidence = "-", 0.0
+                self.status = "tidak ada gesture"
                 return
             if confidence < self.cfg.prediction_threshold:
                 self.history.clear()
-                self.status = f"confidence {confidence * 100:.0f}% < {self.cfg.prediction_threshold * 100:.0f}%"
+                self.status = f"confidence rendah ({confidence:.0%})"
                 return
-            if margin < self.cfg.top1_margin:
+            if len(top_k) > 1 and margin < self.cfg.top1_margin:
                 self.history.clear()
-                self.status = f"ambigu (margin {margin * 100:.0f}%)"
+                self.status = f"prediksi ambigu (margin {margin:.0%})"
                 return
-            if self.cfg.require_gesture and not self.gesture_active:
-                self.history.clear()
-                self.status = "menunggu gerakan"
-                return
-            if self.cfg.require_stable_motion and not self.is_stable:
-                self.history.clear()
-                self.status = "menunggu stabil"
-                return
-
             self.history.append((raw_label, confidence))
-            self.smoothed_label = raw_label
-            self.smoothed_confidence = sum(score for _, score in self.history) / len(self.history)
-
-            labels = {label for label, _ in self.history}
-            if len(labels) != 1:
-                self.history.clear()
-                self.history.append((raw_label, confidence))
-                self.status = "label berubah, ulangi"
+            labels = [label for label, _ in self.history]
+            counts = {label: labels.count(label) for label in set(labels)}
+            candidate = max(counts, key=counts.get)
+            candidate_scores = [score for label, score in self.history if label == candidate]
+            self.smoothed_label = candidate
+            self.smoothed_confidence = sum(candidate_scores) / len(candidate_scores)
+            if counts[candidate] < self.required_votes:
+                self.status = f"konsensus {counts[candidate]}/{self.required_votes}"
                 return
-
-            if len(self.history) < self.required_votes:
-                self.status = f"konsensus {len(self.history)}/{self.required_votes}"
-                return
-
             if self.smoothed_confidence < self.cfg.prediction_threshold:
-                self.history.clear()
-                self.status = "confidence rata-rata rendah"
+                self.status = "confidence konsensus rendah"
                 return
-
-            stable_label = raw_label
-            if stable_label == self.hold_label:
-                self.status = "sudah dikomit"
+            if candidate == self.hold_label:
+                self.status = "label sudah dikomit; lepaskan tangan untuk mengulang"
                 return
-            if timestamp - self.last_commit_at < self.cfg.commit_cooldown:
+            if now - self.last_commit_at < self.cfg.commit_cooldown:
                 self.status = "cooldown"
                 return
-
-            held_seconds = 0.0 if self.stable_since is None else timestamp - self.stable_since
-            if held_seconds < self.cfg.min_hold_seconds:
-                self.status = f"tahan {held_seconds:.1f}/{self.cfg.min_hold_seconds:.1f}s"
+            if self.cfg.min_hold_seconds and self.stable_since is not None and now - self.stable_since < self.cfg.min_hold_seconds:
+                self.status = "tahan gesture sebentar"
                 return
-            if self.cfg.require_stable_motion and not self.is_stable:
-                self.history.clear()
-                self.status = "menunggu stabil"
-                return
-
-            self._commit_locked(stable_label)
-            self.hold_label = stable_label
-            self.last_commit_at = timestamp
+            self._commit_locked(candidate)
+            self.hold_label = candidate
+            self.last_commit_at = now
             self.history.clear()
-            self.gesture_active = False
-            self.is_stable = False
-            self.motion_history.clear()
-            self.status = f"dikomit: {stable_label}"
-
-    def _release_hold_locked(self) -> None:
-        self.hold_label = None
+            self.status = f"dikomit: {candidate}"
 
     def _commit_locked(self, label: str) -> None:
         label = label.strip()
         if not label:
             return
-
         if len(label) == 1 and label.isalpha():
             self.text += label.upper()
         else:
-            if self.text and not self.text.endswith(" "):
-                self.text += " "
-            self.text += label + " "
-
-        if len(self.text) > self.cfg.text_limit:
-            self.text = self.text[-self.cfg.text_limit :]
-
+            self.text = self.text.rstrip() + (" " if self.text.strip() else "") + label + " "
+        self.text = self.text[-self.cfg.text_limit:]
         self.commit_count += 1
         self.last_commit_label = label
         print(f"[TEKS] +{label} -> {self.text.strip()}")
@@ -711,6 +584,7 @@ class SignTextDecoder:
     def register_error(self, message: str) -> None:
         with self._lock:
             self.last_error = message
+            self.status = "request prediksi gagal"
 
     def add_space(self) -> None:
         with self._lock:
@@ -719,8 +593,7 @@ class SignTextDecoder:
 
     def backspace(self) -> None:
         with self._lock:
-            self.text = self.text.rstrip()
-            self.text = self.text[:-1]
+            self.text = self.text.rstrip()[:-1]
 
     def clear(self) -> None:
         with self._lock:
@@ -734,88 +607,67 @@ class SignTextDecoder:
             self.smoothed_label = "-"
             self.smoothed_confidence = 0.0
             self.raw_margin = 0.0
-            self.status = "menunggu gerakan"
+            self.status = "menunggu tangan"
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "raw_label": self.raw_label,
-                "raw_confidence": self.raw_confidence,
-                "raw_margin": self.raw_margin,
-                "smoothed_label": self.smoothed_label,
-                "smoothed_confidence": self.smoothed_confidence,
-                "top_k": list(self.top_k),
-                "latency_ms": self.latency_ms,
-                "text": self.text,
-                "window_len": len(self.window),
-                "active_ratio": self.active_ratio,
-                "motion": self.motion,
-                "stable": self.is_stable,
-                "gesture_active": self.gesture_active,
-                "progress": len(self.history),
-                "required": self.required_votes,
-                "status": self.status,
-                "error": self.last_error,
-                "commits": self.commit_count,
+                "raw_label": self.raw_label, "raw_confidence": self.raw_confidence,
+                "raw_margin": self.raw_margin, "smoothed_label": self.smoothed_label,
+                "smoothed_confidence": self.smoothed_confidence, "top_k": list(self.top_k),
+                "latency_ms": self.latency_ms, "text": self.text,
+                "window_len": len(self.window), "active_ratio": self.active_ratio,
+                "motion": self.motion, "stable": self.is_stable,
+                "gesture_active": self.gesture_active, "progress": len(self.history),
+                "required": self.required_votes, "status": self.status,
+                "error": self.last_error, "commits": self.commit_count,
                 "last_commit": self.last_commit_label,
             }
 
 
 class PredictionWorker(threading.Thread):
-    """Inferensi di thread terpisah supaya loop kamera tetap 30 FPS."""
-
+    """Single inference worker with a replaceable latest-frame-window queue."""
     def __init__(self, client: ModelClient, decoder: SignTextDecoder, debug: bool = False) -> None:
-        super().__init__(daemon=True)
-        self._client = client
-        self._decoder = decoder
-        self._debug = debug
+        super().__init__(daemon=True, name="bisindo-prediction-worker")
+        self._client, self._decoder, self._debug = client, decoder, debug
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._latest: np.ndarray | None = None
-        self._stop = False
+        self._shutdown = False  # Do not shadow Thread._stop(), which join() calls.
 
     def submit(self, sequence: np.ndarray) -> None:
         with self._lock:
-            self._latest = sequence
+            self._latest = sequence.copy()
         self._event.set()
 
     def stop(self) -> None:
-        self._stop = True
+        self._shutdown = True
         self._event.set()
-        self.join(timeout=2.0)
+        if self.is_alive():
+            self.join(timeout=25.0)  # request timeout is 20 s
+        if self.is_alive():
+            print("[WARNING] Prediction worker masih menunggu service; proses dapat berhenti setelah timeout.")
 
     def run(self) -> None:
         while True:
-            self._event.wait(0.5)
-            if self._stop:
+            self._event.wait()
+            if self._shutdown:
                 return
             self._event.clear()
-
             with self._lock:
-                sequence = self._latest
-                self._latest = None
+                sequence, self._latest = self._latest, None
             if sequence is None:
                 continue
-
             started = time.perf_counter()
             try:
-                prediction = self._client.predict(sequence)
+                result = self._client.predict(sequence)
+                latency = (time.perf_counter() - started) * 1000.0
+                self._decoder.register_prediction(result, latency)
+                if self._debug:
+                    print(f"[PREDIKSI] {result.get('label')} "
+                          f"{float(result.get('confidence', 0.0)):.1%} | {latency:.0f} ms")
             except Exception as exc:
                 self._decoder.register_error(str(exc))
-                continue
-
-            latency_ms = (time.perf_counter() - started) * 1000.0
-            self._decoder.register_prediction(prediction, latency_ms)
-
-            if self._debug:
-                top = ", ".join(
-                    f"{item.get('label')}:{float(item.get('confidence', 0.0)):.2f}"
-                    for item in (prediction.get("top_k") or [])[:3]
-                )
-                print(
-                    f"[PREDIKSI] {prediction.get('label')} "
-                    f"{float(prediction.get('confidence', 0.0)) * 100:.1f}% | {top} | {latency_ms:.0f} ms"
-                )
 
 
 def draw_keypoints(image: np.ndarray, keypoints: np.ndarray, mirror: bool = True) -> None:
@@ -823,14 +675,10 @@ def draw_keypoints(image: np.ndarray, keypoints: np.ndarray, mirror: bool = True
         return
     height, width = image.shape[:2]
     for offset in (0, 63):
-        hand = np.asarray(keypoints[offset : offset + 63], dtype=np.float32).reshape(21, 3)
+        hand = np.asarray(keypoints[offset:offset + 63], dtype=np.float32).reshape(21, 3)
         if float(np.abs(hand).sum()) < 1e-6:
             continue
-        points = []
-        for x, y, _ in hand:
-            px = int(((1.0 - x) if mirror else x) * width)
-            py = int(y * height)
-            points.append((px, py))
+        points = [(int(((1.0 - x) if mirror else x) * width), int(y * height)) for x, y, _ in hand]
         for start, end in HAND_CONNECTIONS:
             cv2.line(image, points[start], points[end], (0, 255, 0), 2, cv2.LINE_AA)
         for point in points:
@@ -839,14 +687,9 @@ def draw_keypoints(image: np.ndarray, keypoints: np.ndarray, mirror: bool = True
 
 
 def draw_mediapipe_hands(image: np.ndarray, results: Any, mirror: bool = True) -> None:
-    hands = getattr(results, "hand_landmarks", None) or []
-    height, width = image.shape[:2]
-    for hand in hands[:2]:
-        points = []
-        for landmark in hand:
-            px = int(((1.0 - landmark.x) if mirror else landmark.x) * width)
-            py = int(landmark.y * height)
-            points.append((px, py))
+    for hand in (getattr(results, "hand_landmarks", None) or [])[:2]:
+        height, width = image.shape[:2]
+        points = [(int(((1.0 - lm.x) if mirror else lm.x) * width), int(lm.y * height)) for lm in hand]
         for start, end in HAND_CONNECTIONS:
             cv2.line(image, points[start], points[end], (0, 255, 0), 2, cv2.LINE_AA)
         for point in points:
@@ -859,129 +702,40 @@ def wrap_text(text: str, width: int, max_lines: int) -> list[str]:
     if not cleaned:
         return ["(belum ada teks)"]
     lines = textwrap.wrap(cleaned, width=max(10, width))
-    if not lines:
-        return [cleaned[-max(10, width) :]]
-    return lines[-max_lines:]
+    return (lines or [cleaned[-max(10, width):]])[-max_lines:]
 
 
 def draw_hud(image: np.ndarray, snap: dict[str, Any], cfg: Config, fps: float, backend: str) -> None:
     height, width = image.shape[:2]
-
     cv2.rectangle(image, (0, 0), (width, 66), (245, 117, 16), -1)
-
     label = snap["smoothed_label"] if snap["smoothed_label"] != "-" else "-"
-    confidence = snap["smoothed_confidence"] * 100.0
-    cv2.putText(
-        image,
-        f"Kandidat: {label} ({confidence:.0f}%)",
-        (10, 30),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2,
-        cv2.LINE_AA,
-    )
-    cv2.putText(
-        image,
-        f"raw {snap['raw_label']} {snap['raw_confidence'] * 100:.0f}% | margin {snap['raw_margin'] * 100:.0f}% | "
-        f"{snap['latency_ms']:.0f} ms | FPS {fps:.0f} | {backend}",
-        (10, 56),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (255, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
-
-    bar_width = 150
-    bar_x = width - bar_width - 10
+    cv2.putText(image, f"Kandidat: {label} ({snap['smoothed_confidence']:.0%})", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(image, f"raw {snap['raw_label']} {snap['raw_confidence']:.0%} | margin {snap['raw_margin']:.0%} | "
+                f"{snap['latency_ms']:.0f} ms | FPS {fps:.0f} | {backend}", (10, 56),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1, cv2.LINE_AA)
+    bar_width = min(150, max(60, width // 4))
+    bar_x = max(10, width - bar_width - 10)
     cv2.rectangle(image, (bar_x, 14), (bar_x + bar_width, 40), (255, 255, 255), 1)
     required = max(1, int(snap["required"]))
     progress = min(required, int(snap["progress"]))
-    fill_ratio = progress / required
-    ready = progress >= required
-    cv2.rectangle(
-        image,
-        (bar_x, 14),
-        (bar_x + int(bar_width * fill_ratio), 40),
-        (0, 200, 0) if ready else (0, 165, 255),
-        -1,
-    )
-    cv2.putText(
-        image,
-        f"{progress}/{required}",
-        (bar_x + 6, 33),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (0, 0, 0),
-        1,
-        cv2.LINE_AA,
-    )
-
-    panel_top = height - 120
+    cv2.rectangle(image, (bar_x, 14), (bar_x + int(bar_width * progress / required), 40),
+                  (0, 200, 0) if progress >= required else (0, 165, 255), -1)
+    cv2.putText(image, f"{progress}/{required}", (bar_x + 6, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1)
+    panel_top = max(70, height - 120)
     overlay = image.copy()
-    cv2.rectangle(overlay, (0, panel_top), (width, height - 26), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, panel_top), (width, max(panel_top, height - 26)), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
-    cv2.putText(
-        image,
-        "Teks:",
-        (10, panel_top + 18),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (0, 255, 255),
-        1,
-        cv2.LINE_AA,
-    )
-
-    width_chars = max(16, int((width - 20) / 11))
-    for index, line in enumerate(wrap_text(snap["text"], width_chars, 3)):
-        cv2.putText(
-            image,
-            line,
-            (10, panel_top + 42 + index * 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.62,
-            (255, 255, 255),
-            1,
-            cv2.LINE_AA,
-        )
-
-    cv2.putText(
-        image,
-        "[Q] Keluar  [SPACE] Spasi  [BACKSPACE] Hapus  [C] Reset",
-        (10, height - 8),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.42,
-        (210, 210, 210),
-        1,
-        cv2.LINE_AA,
-    )
-
-    if snap["error"]:
-        cv2.putText(
-            image,
-            f"Error: {str(snap['error'])[:70]}",
-            (10, 92),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 0, 255),
-            1,
-            cv2.LINE_AA,
-        )
-    elif cfg.show_status:
-        status = str(snap["status"])
-        if snap["required"] > 0 and snap["progress"] > 0:
-            status = f"{status}  ({snap['progress']}/{snap['required']})"
-        cv2.putText(
-            image,
-            status[:60],
-            (10, 92),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 215, 255),
-            1,
-            cv2.LINE_AA,
-        )
+    cv2.putText(image, "Teks:", (10, panel_top + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    for index, line in enumerate(wrap_text(snap["text"], max(16, int((width - 20) / 11)), 3)):
+        y = min(height - 32, panel_top + 42 + index * 24)
+        cv2.putText(image, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(image, "[Q] Keluar  [SPACE] Spasi  [BACKSPACE] Hapus  [C] Reset", (10, height - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (210, 210, 210), 1, cv2.LINE_AA)
+    message = snap["error"] or (snap["status"] if cfg.show_status else None)
+    if message:
+        cv2.putText(image, str(message)[:70], (10, 92), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                    (0, 0, 255) if snap["error"] else (0, 215, 255), 1, cv2.LINE_AA)
 
 
 def open_camera(cfg: Config) -> cv2.VideoCapture:
@@ -990,7 +744,6 @@ def open_camera(cfg: Config) -> cv2.VideoCapture:
         if not capture.isOpened():
             capture.release()
             continue
-
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.capture_width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.capture_height)
         capture.set(cv2.CAP_PROP_FPS, cfg.capture_fps)
@@ -998,173 +751,149 @@ def open_camera(cfg: Config) -> cv2.VideoCapture:
             capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        print(f"[KAMERA] indeks {index} | {width}x{height}")
+        print(f"[KAMERA] indeks {index} | {int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))}x"
+              f"{int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
         return capture
+    raise RuntimeError("Kamera tidak bisa dibuka. Coba --camera 1 atau periksa izin kamera.")
 
-    raise RuntimeError("Kamera tidak bisa dibuka. Coba `--camera 1` atau cek izin kamera.")
+
+def _handle_key(key: int, decoder: SignTextDecoder) -> bool:
+    if key == ord("q"):
+        return False
+    if key == 32:
+        decoder.add_space()
+    elif key in (8, 127, 255):
+        decoder.backspace()
+    elif key in (ord("c"), ord("C")):
+        decoder.clear()
+    return True
 
 
 def run_camera(cfg: Config) -> None:
     client = ModelClient(cfg.model_url)
-    client.connect()
-    print_service_info(client)
-
-    session_id = str(uuid.uuid4())
-    landmarker = create_landmarker(cfg, session_id)
+    landmarker: LandmarkSource | None = None
+    capture: cv2.VideoCapture | None = None
+    worker: PredictionWorker | None = None
     decoder = SignTextDecoder(cfg)
-    worker = PredictionWorker(client, decoder, cfg.debug)
-    worker.start()
-
-    capture = open_camera(cfg)
-    timestamps = TimestampSource()
-
-    fps_value = 0.0
-    fps_counter = 0
-    fps_started = time.perf_counter()
-
     try:
+        client.connect()
+        print_service_info(client)
+        landmarker = create_landmarker(cfg, str(uuid.uuid4()))
+        worker = PredictionWorker(client, decoder, cfg.debug)
+        worker.start()
+        capture = open_camera(cfg)
+        timestamps = TimestampSource()
+        fps, count, started = 0.0, 0, time.perf_counter()
         while True:
             ok, frame = capture.read()
             if not ok:
                 print("[WARNING] Frame kamera tidak terbaca, keluar.")
                 break
-
-            keypoints, hand_count, results = landmarker.process(frame, timestamps.next())
-            request_sequence = decoder.push(keypoints, hand_count)
-            if request_sequence is not None:
-                worker.submit(request_sequence)
-
+            points, hands, results = landmarker.process(frame, timestamps.next())
+            sequence = decoder.push(points, hands)
+            if sequence is not None:
+                worker.submit(sequence)
             display = cv2.flip(frame, 1)
             if results is not None:
                 draw_mediapipe_hands(display, results, mirror=True)
-            elif hand_count > 0:
-                draw_keypoints(display, keypoints, mirror=True)
-
-            fps_counter += 1
+            elif hands:
+                draw_keypoints(display, points, mirror=True)
+            count += 1
             now = time.perf_counter()
-            if now - fps_started >= 0.5:
-                fps_value = fps_counter / (now - fps_started)
-                fps_counter = 0
-                fps_started = now
-
-            draw_hud(display, decoder.snapshot(), cfg, fps_value, landmarker.backend)
+            if now - started >= 0.5:
+                fps, count, started = count / (now - started), 0, now
+            draw_hud(display, decoder.snapshot(), cfg, fps, landmarker.backend)
             cv2.imshow("Deteksi BISINDO - Teks Realtime", display)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
+            if not _handle_key(cv2.waitKey(1) & 0xFF, decoder):
                 break
-            if key == 32:
-                decoder.add_space()
-            elif key in (8, 127):
-                decoder.backspace()
-            elif key in (ord("c"), ord("C")):
-                decoder.clear()
     finally:
-        worker.stop()
-        landmarker.close()
-        capture.release()
+        if worker is not None:
+            worker.stop()
+        if capture is not None:
+            capture.release()
+        if landmarker is not None:
+            landmarker.close()
+        client.close()
         cv2.destroyAllWindows()
-
-    final_text = decoder.snapshot()["text"].strip()
-    print(f"\nTeks akhir: {final_text or '(kosong)'}")
+    final = decoder.snapshot()["text"].strip()
+    print(f"\nTeks akhir: {final or '(kosong)'}")
 
 
 def run_video(cfg: Config, video_path: Path, show: bool, max_frames: int | None) -> None:
     client = ModelClient(cfg.model_url)
-    client.connect()
-    print_service_info(client)
-
-    session_id = str(uuid.uuid4())
-    landmarker = create_landmarker(cfg, session_id)
+    landmarker: LandmarkSource | None = None
+    capture: cv2.VideoCapture | None = None
     decoder = SignTextDecoder(cfg)
-
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        landmarker.close()
-        raise RuntimeError(f"Video tidak bisa dibuka: {video_path}")
-
-    source_fps = capture.get(cv2.CAP_PROP_FPS) or 30.0
     index = 0
-
     try:
-        while True:
+        client.connect()
+        print_service_info(client)
+        landmarker = create_landmarker(cfg, str(uuid.uuid4()))
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Video tidak bisa dibuka: {video_path}")
+        source_fps = capture.get(cv2.CAP_PROP_FPS)
+        if not np.isfinite(source_fps) or source_fps <= 0:
+            source_fps = 30.0
+        while max_frames is None or index < max_frames:
             ok, frame = capture.read()
             if not ok:
                 break
-
             timestamp_ms = int(index / source_fps * 1000)
-            keypoints, hand_count, results = landmarker.process(frame, timestamp_ms)
-            request_sequence = decoder.push(keypoints, hand_count)
-
-            if request_sequence is not None:
+            points, hands, results = landmarker.process(frame, timestamp_ms)
+            sequence = decoder.push(points, hands)
+            if sequence is not None:
                 started = time.perf_counter()
                 try:
-                    prediction = client.predict(request_sequence)
+                    prediction = client.predict(sequence)
+                    decoder.register_prediction(prediction, (time.perf_counter() - started) * 1000.0)
+                    if cfg.debug:
+                        print(f"[PREDIKSI] {prediction.get('label')} {float(prediction.get('confidence', 0.0)):.1%}")
                 except Exception as exc:
                     decoder.register_error(str(exc))
-                else:
-                    latency_ms = (time.perf_counter() - started) * 1000.0
-                    decoder.register_prediction(prediction, latency_ms)
-                    if cfg.debug:
-                        top = ", ".join(
-                            f"{item.get('label')}:{float(item.get('confidence', 0.0)):.2f}"
-                            for item in (prediction.get("top_k") or [])[:3]
-                        )
-                        print(
-                            f"[PREDIKSI] {prediction.get('label')} "
-                            f"{float(prediction.get('confidence', 0.0)) * 100:.1f}% | {top}"
-                        )
-
             if show:
                 display = frame.copy()
                 if results is not None:
                     draw_mediapipe_hands(display, results, mirror=False)
-                elif hand_count > 0:
-                    draw_keypoints(display, keypoints, mirror=False)
+                elif hands:
+                    draw_keypoints(display, points, mirror=False)
                 draw_hud(display, decoder.snapshot(), cfg, source_fps, landmarker.backend)
                 cv2.imshow("Deteksi BISINDO - Uji Video", display)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
+                    index += 1
                     break
-
             index += 1
-            if max_frames is not None and index >= max_frames:
-                break
     finally:
-        capture.release()
-        landmarker.close()
+        if capture is not None:
+            capture.release()
+        if landmarker is not None:
+            landmarker.close()
+        client.close()
         cv2.destroyAllWindows()
-
     snap = decoder.snapshot()
     print(f"\nTotal frame diproses: {index} | total commit: {snap['commits']}")
     print(f"Teks akhir: {snap['text'].strip() or '(kosong)'}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Deteksi BISINDO realtime menjadi teks (model A-Z + kata)."
-    )
+    parser = argparse.ArgumentParser(description="Deteksi BISINDO realtime menjadi teks (model A-Z + kata).")
     parser.add_argument("--camera", type=int, default=None, help="Indeks kamera (default: env CAMERA_INDEX / 0)")
-    parser.add_argument(
-        "--backend",
-        choices=["auto", "local", "docker"],
-        default=None,
-        help="Sumber landmark tangan (default: env LANDMARK_BACKEND / auto)",
-    )
-    parser.add_argument("--video", type=Path, default=None, help="Uji memakai file video, bukan kamera")
-    parser.add_argument("--show", action="store_true", help="Tampilkan preview saat memakai --video")
-    parser.add_argument("--max-frames", type=int, default=None, help="Batasi jumlah frame pada mode --video")
-    parser.add_argument("--debug", action="store_true", help="Cetak top-5 prediksi tiap inferensi")
+    parser.add_argument("--backend", choices=["auto", "local", "docker"], default=None,
+                        help="Backend landmark: local, docker, atau auto")
+    parser.add_argument("--video", type=Path, default=None, help="Uji memakai video, bukan kamera")
+    parser.add_argument("--show", action="store_true", help="Tampilkan preview video")
+    parser.add_argument("--max-frames", type=int, default=None, help="Batas frame dalam mode video")
+    parser.add_argument("--debug", action="store_true", help="Cetak prediksi tiap inferensi")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.max_frames is not None and args.max_frames <= 0:
+        print("[ERROR] --max-frames harus lebih besar dari 0")
+        return 2
     cfg = load_config(args)
     print_banner(cfg)
-
     try:
         if args.video is not None:
             run_video(cfg, args.video, args.show, args.max_frames)
@@ -1172,7 +901,7 @@ def main(argv: list[str] | None = None) -> int:
             run_camera(cfg)
     except KeyboardInterrupt:
         print("\nDihentikan oleh pengguna.")
-    except RuntimeError as exc:
+    except (RuntimeError, requests.RequestException) as exc:
         print(f"\n[ERROR] {exc}")
         return 1
     return 0
