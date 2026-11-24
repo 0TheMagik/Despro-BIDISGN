@@ -14,16 +14,18 @@ RUN apt-get update \
 
 RUN mkdir -p /app/model
 
-# Path relatif terhadap root repo (build context = root repo, lihat docker-compose.yml)
-COPY Deployment/model/requirements.txt requirements.txt
+# Build context adalah folder Deployment/model.
+COPY requirements.txt requirements.txt
 
 # Install PyTorch versi CPU lebih dulu supaya image tidak menarik paket CUDA (~2GB).
 RUN pip install --upgrade pip \
     && pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4" \
     && pip install -r requirements.txt
 
-# deployment_model berisi model_cnn_lstm_isyarat.pt (97 kelas) + labels.json
-COPY Deployment/model/deployment_model /app/model/deployment_model
-COPY Deployment/model/app.py .
+# Model dan label disimpan dalam struktur deployment_model agar konsisten
+# dengan MODEL_PATH dan fallback resolve_model_path() di app.py.
+COPY model_cnn_lstm_isyarat.pt /app/model/deployment_model/model_cnn_lstm_isyarat.pt
+COPY labels.json /app/model/deployment_model/labels.json
+COPY app.py .
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

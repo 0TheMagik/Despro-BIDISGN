@@ -108,8 +108,8 @@ Kedua container bisa dipakai di Cloud Run karena masing-masing sudah expose Fast
 
 ```bash
 gcloud auth configure-docker REGION-docker.pkg.dev
-docker build -f Deployment/handlandmarker/Dockerfile -t REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/handlandmarker:latest .
-docker build -f Deployment/model/Dockerfile -t REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/model:latest .
+docker build -t REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/handlandmarker:latest ./Deployment/handlandmarker
+docker build -t REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/model:latest ./Deployment/model
 docker push REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/handlandmarker:latest
 docker push REGION-docker.pkg.dev/PROJECT_ID/REPO_NAME/model:latest
 ```
