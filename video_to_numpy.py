@@ -69,6 +69,16 @@ def extract_keypoints(results):
     return np.zeros(126, dtype=np.float32)
 
 
+def get_handedness_labels(results):
+    categories = getattr(results, "handedness", None) or []
+    labels = []
+    for category_list in categories[:2]:
+        category = category_list[0] if category_list else None
+        label = getattr(category, "display_name", None) or getattr(category, "category_name", None)
+        labels.append(str(label or "?"))
+    return labels
+
+
 def convert_video_to_numpy(
     video_path: Path,
     out_path: Path,
@@ -76,9 +86,9 @@ def convert_video_to_numpy(
     frame_step=1,
     max_frames=60,
     normalize=False,
-    min_hand_detection_confidence=0.5,
-    min_hand_presence_confidence=0.5,
-    min_tracking_confidence=0.5,
+    min_hand_detection_confidence=0.2,
+    min_hand_presence_confidence=0.2,
+    min_tracking_confidence=0.2,
 ):
     thresholds = (
         min_hand_detection_confidence,
@@ -126,6 +136,9 @@ def convert_video_to_numpy(
             frame_timestamp_ms = int((idx / fps) * 1000)
             results = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
             keypoints = extract_keypoints(results)
+            handedness = get_handedness_labels(results)
+            if handedness:
+                print(f"[DEBUG] {video_path.name} frame={idx} handedness={handedness} | slots={len(handedness)}")
 
             frames.append(keypoints)
             idx += 1

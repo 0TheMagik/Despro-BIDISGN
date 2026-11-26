@@ -43,9 +43,11 @@ python Deployment/realtime_detection_docker.py
 Fitur:
 
 - **Cepat**: landmark tangan diproses MediaPipe lokal (default `LANDMARK_BACKEND=auto`) sehingga tidak ada round-trip HTTP per frame. Inferensi model berjalan di thread terpisah, jadi loop kamera tetap lancar. Untuk tetap memakai container: `--backend docker`.
-- **Sliding window**: window default 45 frame digeser tiap 6 frame. Service model me-resample ke 90 frame + normalisasi (sama seperti training), sehingga prediksi baru muncul kira-kira tiap 0.2 detik setelah window terisi.
+- **Sliding window per gerakan**: window keypoint di-reset setiap kali gerakan baru dimulai, sehingga prediksi hanya melihat gestur yang sedang berjalan (bukan campuran gestur lama + baru). Window dikirim apa adanya (mis. 36 frame), lalu service model me-resample ke 90 frame + normalisasi seperti training.
 - **Output teks**: huruf A-Z otomatis digabung menjadi kata, label kata otomatis diberi spasi.
-- **Anti-noise**: teks hanya dikomit setelah tangan diam sesaat, confidence ≥ 95%, margin top-1 vs top-2 ≥ 20%, dan label konsisten 5 prediksi berturut-turut. Setelah dikomit, label yang sama tidak diulang sampai tangan dilepas/digerakkan lagi.
+- **Konsisten dengan gerakan**: probabilitas semua kelas dirata-rata (EMA) antar-prediksi, label harus stabil beberapa prediksi, confidence + margin tinggi, tangan berhenti stabil, dan setelah dikomit decoder **terkunci** sampai tangan digerakkan lagi atau dilepas. Jadi satu gerakan hanya menghasilkan satu huruf/kata (tidak dobel, tidak berubah-ubah).
+- **Stabil terhadap jarak kamera**: status "tangan diam" dihitung dari fitur yang sudah dinormalisasi (wrist-relative + skala), bukan koordinat piksel, jadi ambang tidak berubah saat tangan lebih dekat/jauh.
+- **Slot tangan konsisten**: urutan tangan kiri/kanan ditempelkan ke frame sebelumnya supaya MediaPipe tidak menukar slot di tengah gestur.
 - Kontrol keyboard: `SPACE` menambah spasi, `BACKSPACE` menghapus, `C` reset teks, `Q` keluar.
 
 Kalau service tidak ada di `localhost`, atur environment variable:
@@ -61,7 +63,8 @@ set MODEL_URL=http://127.0.0.1:8002
 2. Model service melakukan **resample ke 90 frame + normalisasi wrist-relative** persis seperti `normalize_sequence()` pada notebook training PyTorch.
 3. Urutan label diambil dari checkpoint `.pt` (`actions`, sorted A-Z lalu kata) dan divalidasi dengan `Deployment/model/deployment_model/labels.json`. Jangan mengubah urutan label secara manual.
 4. Service handlandmarker memakai confidence detection `0.2` (sama dengan resep `video_to_numpy.py`). Untuk backend lokal, atur lewat env `HAND_DETECTION_CONFIDENCE`, `HAND_PRESENCE_CONFIDENCE`, `HAND_TRACKING_CONFIDENCE`.
-5. Mode ketat bisa dilonggarkan lewat `.env` (turunkan `PREDICTION_THRESHOLD`/`STABLE_PREDICTIONS`, atau set `REQUIRE_GESTURE=0`), tetapi output akan lebih mudah noise. Untuk mengulang huruf/kata yang sama, lepaskan tangan sebentar (minimal `RELEASE_AFTER_EMPTY_FRAMES` frame) lalu sign lagi.
+5. Mode ketat bisa dilonggarkan lewat `.env` (turunkan `PREDICTION_THRESHOLD`/`MIN_VOTE_SHARE`, atau set `REQUIRE_GESTURE=0`), tetapi output akan lebih mudah noise. Untuk mengulang huruf/kata yang sama: gerakkan tangan sedikit lalu sign lagi (atau lepaskan tangan sebentar) supaya kunci `LOCK_AFTER_COMMIT` terbuka.
+6. Kalau tangan sudah dalam posisi huruf sebelum aplikasi jalan, gerakkan dulu sedikit agar sesi gestur baru dimulai (`REQUIRE_GESTURE=1`). Set `REQUIRE_GESTURE=0` untuk mengizinkan gestur statis langsung.
 
 ### Pengaturan client (file `Deployment/.env`)
 
@@ -71,26 +74,31 @@ set MODEL_URL=http://127.0.0.1:8002
 | `WINDOW_FRAMES`              | 36      | Jumlah frame yang dikirim per prediksi (di-resample ke 90)      |
 | `MIN_WINDOW_FRAMES`          | 24      | Minimum frame sebelum prediksi pertama                          |
 | `STRIDE_FRAMES`              | 3       | Geser window tiap N frame (makin kecil = makin responsif)       |
-| `PREDICTION_THRESHOLD`       | 0.95    | Confidence minimum agar label diterima (0.95 = 95%)             |
+| `PREDICTION_THRESHOLD`       | 0.90    | Confidence minimum (setelah smoothing) agar label diterima      |
 | `TOP1_MARGIN`                | 0.20    | Selisih minimum top-1 vs top-2 (menolak prediksi ambigu)        |
-| `VOTE_WINDOW`                | 5       | Jumlah prediksi terakhir yang harus sepakat                     |
-| `STABLE_PREDICTIONS`         | 5       | Prediksi konsisten berturut-turut sebelum masuk teks            |
-| `COMMIT_COOLDOWN_SECONDS`    | 0.6     | Jeda minimum antar-commit                                       |
-| `MIN_HOLD_SECONDS`           | 0.3     | Lama gestur harus ditahan stabil sebelum boleh commit           |
+| `PROB_SMOOTH_ALPHA`          | 0.45    | Bobot prediksi terbaru pada EMA probabilitas (kecil = halus)    |
+| `VOTE_WINDOW`                | 4       | Jumlah prediksi terakhir yang dipakai untuk vote                |
+| `STABLE_PREDICTIONS`         | 3       | Prediksi konsisten berturut-turut sebelum masuk teks            |
+| `MIN_VOTE_SHARE`             | 0.80    | Porsi minimum label yang sama dalam `VOTE_WINDOW`               |
+| `LOCK_AFTER_COMMIT`          | 1       | Kunci decoder setelah commit (satu gerakan = satu output)       |
+| `REPEAT_COOLDOWN_SECONDS`    | 0.8     | Jeda minimum sebelum gestur berikutnya boleh dikomit            |
+| `COMMIT_COOLDOWN_SECONDS`    | 0.4     | Jeda minimum antar-commit                                       |
+| `MIN_HOLD_SECONDS`           | 0.25    | Lama gestur harus ditahan stabil sebelum boleh commit           |
 | `REQUIRE_GESTURE`            | 1       | Wajib gerakan dulu sebelum commit                               |
 | `REQUIRE_STABLE_MOTION`      | 1       | Wajib tangan berhenti stabil sebelum commit                     |
-| `GESTURE_MOTION_THRESHOLD`   | 0.020   | Besar gerakan yang dianggap memulai gestur                      |
-| `MOVEMENT_THRESHOLD`         | 0.012   | Ambang tangan dianggap diam                                     |
-| `STABILITY_FRAMES`           | 6       | Jumlah frame diam berturut-turut agar dianggap stabil           |
-| `GESTURE_TIMEOUT_SECONDS`    | 4.0     | Batas waktu dari gerakan sampai commit                          |
-| `RELEASE_AFTER_EMPTY_FRAMES` | 8       | Frame tanpa tangan sebelum label "dipegang" dilepas             |
+| `GESTURE_MOTION_THRESHOLD`   | 0.020   | Besar gerakan (koordinat gambar) yang dianggap memulai gestur   |
+| `STABLE_MOTION_THRESHOLD`    | 0.035   | Ambang tangan dianggap diam (fitur ternormalisasi)              |
+| `STABILITY_FRAMES`           | 4       | Jumlah frame diam berturut-turut agar dianggap stabil           |
+| `GESTURE_TIMEOUT_SECONDS`    | 5.0     | Batas waktu dari gerakan sampai commit                          |
+| `HAND_SLOT_TRACKING`         | 1       | Tempelkan slot tangan ke frame sebelumnya (anti slot tertukar)  |
+| `RELEASE_AFTER_EMPTY_FRAMES` | 6       | Frame tanpa tangan sebelum window & kunci dilepas               |
 | `MIN_ACTIVE_RATIO`           | 0.6     | Proporsi frame berisi tangan minimum untuk inferensi            |
 | `SHOW_STATUS`                | 0       | Tampilkan baris status di video (0 = sembunyikan)               |
 | `CAPTURE_WIDTH/HEIGHT`       | 640/480 | Resolusi kamera (lebih kecil = lebih lancar)                    |
 | `CAPTURE_FPS`                | 30      | Target FPS kamera                                               |
 | `JPEG_QUALITY`               | 80      | Kualitas JPEG saat memakai backend `docker`                     |
 | `TEXT_LIMIT`                 | 160     | Panjang maksimum teks yang disimpan                             |
-| `DEBUG`                      | 0       | Cetak top-5 prediksi tiap inferensi                             |
+| `DEBUG`                      | 0       | Cetak top-5 prediksi tiap inferensi + nilai motion              |
 
 ### Mode uji tanpa kamera
 

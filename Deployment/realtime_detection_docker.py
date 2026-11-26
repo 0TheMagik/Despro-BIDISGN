@@ -74,6 +74,81 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def normalize_frame(frame: np.ndarray) -> np.ndarray:
+    """Normalisasi 1 frame (wrist-relative + skala) seperti normalize_sequence() saat training."""
+    hands = np.asarray(frame, dtype=np.float32).reshape(2, 21, 3).copy()
+    for hand_index in range(2):
+        hand = hands[hand_index]
+        if float(np.abs(hand).sum()) < 1e-6:
+            continue
+        hand -= hand[:1, :].copy()
+        scale = float(np.linalg.norm(hand, axis=1).max())
+        if scale > 1e-6:
+            hand /= scale
+    return hands.reshape(-1)
+
+
+def _hand_valid(hand: np.ndarray) -> bool:
+    return float(np.abs(hand).sum()) > 1e-6
+
+
+def _hand_distance(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.abs(a.reshape(21, 3)[:, :2] - b.reshape(21, 3)[:, :2]).mean())
+
+
+def reorder_hand_slots(frame: np.ndarray, previous: np.ndarray) -> np.ndarray:
+    """Samakan slot tangan dengan frame sebelumnya.
+
+    MediaPipe bisa menukar urutan tangan (kiri/kanan) antar frame. Kalau slot ikut
+    tertukar, fitur 126-dim "melompat", motion palsu muncul, dan prediksi jadi
+    tidak konsisten. Fungsi ini menempelkan tiap tangan ke slot frame sebelumnya.
+    """
+    current_hands = np.asarray(frame, dtype=np.float32).reshape(2, 63)
+    previous_hands = np.asarray(previous, dtype=np.float32).reshape(2, 63)
+    current_valid = [_hand_valid(hand) for hand in current_hands]
+    previous_valid = [_hand_valid(hand) for hand in previous_hands]
+
+    current_count = int(sum(current_valid))
+    previous_count = int(sum(previous_valid))
+    if current_count == 0 or previous_count == 0:
+        return frame
+
+    if current_count == 2 and previous_count == 2:
+        keep = _hand_distance(current_hands[0], previous_hands[0]) + _hand_distance(
+            current_hands[1], previous_hands[1]
+        )
+        swap = _hand_distance(current_hands[1], previous_hands[0]) + _hand_distance(
+            current_hands[0], previous_hands[1]
+        )
+        if swap < keep:
+            return np.concatenate([current_hands[1], current_hands[0]])
+        return frame
+
+    if current_count == 1:
+        index = current_valid.index(True)
+        occupied = [slot for slot, valid in enumerate(previous_valid) if valid]
+        target = min(occupied, key=lambda slot: _hand_distance(current_hands[index], previous_hands[slot]))
+        if target == index:
+            return frame
+        reordered = np.zeros_like(current_hands)
+        reordered[target] = current_hands[index]
+        return reordered.reshape(-1)
+
+    slot = previous_valid.index(True)
+    best = (
+        0
+        if _hand_distance(current_hands[0], previous_hands[slot])
+        <= _hand_distance(current_hands[1], previous_hands[slot])
+        else 1
+    )
+    if best == slot:
+        return frame
+    reordered = np.zeros_like(current_hands)
+    reordered[slot] = current_hands[best]
+    reordered[1 - slot] = current_hands[1 - best]
+    return reordered.reshape(-1)
+
+
 def resolve_landmark_model_path() -> Path | None:
     candidates: list[Path] = []
     explicit = os.getenv("HAND_LANDMARKER_MODEL_PATH")
@@ -105,14 +180,19 @@ class Config:
     top1_margin: float
     vote_window: int
     stable_predictions: int
+    min_vote_share: float
+    prob_smooth_alpha: float
     release_after_empty_frames: int
     min_active_ratio: float
-    movement_threshold: float
+    stable_motion_threshold: float
     gesture_motion_threshold: float
     stability_frames: int
     gesture_timeout: float
     min_hold_seconds: float
     commit_cooldown: float
+    repeat_cooldown: float
+    lock_after_commit: bool
+    slot_tracking: bool
     require_stable_motion: bool
     require_gesture: bool
     capture_width: int
@@ -129,18 +209,23 @@ def load_config(args: argparse.Namespace) -> Config:
     window_frames = max(8, min(env_int("WINDOW_FRAMES", env_int("SEQ_LEN", 36)), 180))
     min_window_frames = max(4, min(env_int("MIN_WINDOW_FRAMES", min(24, window_frames)), window_frames))
     stride_frames = max(1, env_int("STRIDE_FRAMES", env_int("PREDICT_EVERY_N_FRAMES", 3)))
-    threshold = min(0.999, max(0.5, env_float("PREDICTION_THRESHOLD", 0.95)))
+    threshold = min(0.999, max(0.5, env_float("PREDICTION_THRESHOLD", 0.90)))
     top1_margin = min(0.95, max(0.0, env_float("TOP1_MARGIN", 0.20)))
-    vote_window = max(1, env_int("VOTE_WINDOW", 5))
-    stable_predictions = max(1, env_int("STABLE_PREDICTIONS", 5))
-    release_after_empty_frames = max(1, env_int("RELEASE_AFTER_EMPTY_FRAMES", 8))
+    vote_window = max(1, env_int("VOTE_WINDOW", 4))
+    stable_predictions = max(1, env_int("STABLE_PREDICTIONS", 3))
+    min_vote_share = min(1.0, max(0.5, env_float("MIN_VOTE_SHARE", 0.8)))
+    prob_smooth_alpha = min(1.0, max(0.05, env_float("PROB_SMOOTH_ALPHA", 0.45)))
+    release_after_empty_frames = max(1, env_int("RELEASE_AFTER_EMPTY_FRAMES", 6))
     min_active_ratio = min(0.95, max(0.0, env_float("MIN_ACTIVE_RATIO", 0.6)))
-    movement_threshold = max(0.0005, env_float("MOVEMENT_THRESHOLD", 0.012))
-    gesture_motion_threshold = max(movement_threshold, env_float("GESTURE_MOTION_THRESHOLD", 0.02))
-    stability_frames = max(1, env_int("STABILITY_FRAMES", 6))
-    gesture_timeout = max(0.5, env_float("GESTURE_TIMEOUT_SECONDS", 4.0))
-    min_hold_seconds = max(0.0, env_float("MIN_HOLD_SECONDS", 0.3))
-    commit_cooldown = max(0.0, env_float("COMMIT_COOLDOWN_SECONDS", 0.6))
+    gesture_motion_threshold = max(0.0005, env_float("GESTURE_MOTION_THRESHOLD", 0.02))
+    stable_motion_threshold = max(0.0005, env_float("STABLE_MOTION_THRESHOLD", 0.035))
+    stability_frames = max(1, env_int("STABILITY_FRAMES", 4))
+    gesture_timeout = max(0.5, env_float("GESTURE_TIMEOUT_SECONDS", 5.0))
+    min_hold_seconds = max(0.0, env_float("MIN_HOLD_SECONDS", 0.25))
+    commit_cooldown = max(0.0, env_float("COMMIT_COOLDOWN_SECONDS", 0.4))
+    repeat_cooldown = max(0.0, env_float("REPEAT_COOLDOWN_SECONDS", 0.8))
+    lock_after_commit = env_bool("LOCK_AFTER_COMMIT", True)
+    slot_tracking = env_bool("HAND_SLOT_TRACKING", True)
     require_stable_motion = env_bool("REQUIRE_STABLE_MOTION", True)
     require_gesture = env_bool("REQUIRE_GESTURE", True)
     show_status = env_bool("SHOW_STATUS", False)
@@ -165,14 +250,19 @@ def load_config(args: argparse.Namespace) -> Config:
         top1_margin=top1_margin,
         vote_window=vote_window,
         stable_predictions=stable_predictions,
+        min_vote_share=min_vote_share,
+        prob_smooth_alpha=prob_smooth_alpha,
         release_after_empty_frames=release_after_empty_frames,
         min_active_ratio=min_active_ratio,
-        movement_threshold=movement_threshold,
+        stable_motion_threshold=stable_motion_threshold,
         gesture_motion_threshold=gesture_motion_threshold,
         stability_frames=stability_frames,
         gesture_timeout=gesture_timeout,
         min_hold_seconds=min_hold_seconds,
         commit_cooldown=commit_cooldown,
+        repeat_cooldown=repeat_cooldown,
+        lock_after_commit=lock_after_commit,
+        slot_tracking=slot_tracking,
         require_stable_motion=require_stable_motion,
         require_gesture=require_gesture,
         capture_width=max(160, env_int("CAPTURE_WIDTH", 640)),
@@ -195,11 +285,13 @@ def print_banner(cfg: Config) -> None:
     print(f" Window        : {cfg.min_window_frames}-{cfg.window_frames} frame, stride {cfg.stride_frames}")
     print(
         f" Filter teks   : conf>={cfg.prediction_threshold:.2f} | margin>={cfg.top1_margin:.2f} | "
-        f"konsensus {max(cfg.vote_window, cfg.stable_predictions)}x | tahan {cfg.min_hold_seconds:.1f}s"
+        f"vote>={cfg.min_vote_share:.0%} dari {max(cfg.vote_window, cfg.stable_predictions)} | "
+        f"tahan {cfg.min_hold_seconds:.1f}s"
     )
     print(
-        f" Gerak/stabil  : gerak>={cfg.gesture_motion_threshold:.3f} | diam<={cfg.movement_threshold:.3f} "
-        f"x{cfg.stability_frames} frame | cooldown {cfg.commit_cooldown:.1f}s"
+        f" Gerak/stabil  : gerak>={cfg.gesture_motion_threshold:.3f} | bentuk diam<="
+        f"{cfg.stable_motion_threshold:.3f} x{cfg.stability_frames} frame | "
+        f"kunci={int(cfg.lock_after_commit)} | slot tracking={int(cfg.slot_tracking)}"
     )
     print("=" * 64)
 
@@ -242,6 +334,16 @@ def extract_keypoints(results: Any) -> tuple[np.ndarray, int]:
     return array[:FEATURES], min(len(hands), 2)
 
 
+def get_handedness_labels(results: Any) -> list[str]:
+    categories = getattr(results, "handedness", None) or []
+    labels: list[str] = []
+    for category_list in categories[:2]:
+        category = category_list[0] if category_list else None
+        label = getattr(category, "display_name", None) or getattr(category, "category_name", None)
+        labels.append(str(label or "?"))
+    return labels
+
+
 class LandmarkSource:
     backend = "?"
 
@@ -276,6 +378,7 @@ class LocalLandmarks(LandmarkSource):
             min_tracking_confidence=env_float("HAND_TRACKING_CONFIDENCE", 0.2),
         )
         self._landmarker = mp.tasks.vision.HandLandmarker.create_from_options(options)
+        self._debug = env_bool("DEBUG", False)
         self._last_error_at = 0.0
 
     def process(self, frame: np.ndarray, timestamp_ms: int) -> tuple[np.ndarray, int, Any]:
@@ -291,6 +394,9 @@ class LocalLandmarks(LandmarkSource):
             return np.zeros(FEATURES, dtype=np.float32), 0, None
 
         keypoints, hand_count = extract_keypoints(results)
+        handedness = get_handedness_labels(results)
+        if self._debug and handedness:
+            print(f"[DEBUG] handedness={handedness} | slots={len(handedness)}")
         return keypoints, hand_count, results
 
     def close(self) -> None:
@@ -460,25 +566,39 @@ def print_service_info(client: ModelClient) -> None:
 
 
 class SignTextDecoder:
-    """Menyimpan window keypoint, filter gestur, konsensus prediksi, dan menyusun teks.
+    """Menyimpan window keypoint, filter gestur, smoothing probabilitas, dan menyusun teks.
 
-    Teks hanya dikomit bila SEMUA syarat berikut terpenuhi:
-    1. Tangan diam/stabil sesaat (mode wajib gerakan bisa diaktifkan lewat env).
-    2. Confidence >= threshold dan margin top-1 vs top-2 cukup besar.
-    3. Label konsisten untuk beberapa prediksi berturut-turut (konsensus).
-    4. Cooldown antar-komit sudah lewat dan label belum sedang "dipegang".
+    Prinsip "satu gerakan -> satu output" supaya teks konsisten dengan gerakan:
+    1. Gestur dimulai saat tangan bergerak (motion >= GESTURE_MOTION_THRESHOLD).
+       Window keypoint di-reset supaya prediksi hanya melihat gestur yang sedang berjalan,
+       bukan campuran gestur lama + baru.
+    2. Prediksi hanya diambil saat bentuk tangan stabil (motion pada fitur ternormalisasi kecil),
+       jadi ambang tidak berubah walaupun tangan lebih dekat/jauh dari kamera.
+    3. Probabilitas tiap prediksi di-EMA (PROB_SMOOTH_ALPHA), bukan suara label mentah,
+       sehingga satu frame noise tidak membalik kesimpulan.
+    4. Commit hanya bila confidence + margin + konsensus + tahan minimum terpenuhi.
+    5. Setelah commit decoder TERKUNCI sampai tangan digerakkan lagi atau dilepas,
+       sehingga satu gestur tidak pernah menghasilkan dua huruf/teks.
     """
 
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
         self._lock = threading.Lock()
         self.window: deque[np.ndarray] = deque(maxlen=cfg.window_frames)
-        self.required_votes = max(cfg.vote_window, cfg.stable_predictions)
-        self.history: deque[tuple[str, float]] = deque(maxlen=self.required_votes)
+        self.window_generation = 0
+        self.required_votes = max(1, max(cfg.vote_window, cfg.stable_predictions))
+        self.label_votes: deque[str] = deque(maxlen=max(1, cfg.vote_window))
+        self.streak = 0
+        self.streak_label = "-"
+        self.prob_scores: np.ndarray | None = None
+        self.prob_by_label: dict[str, float] | None = None
+        self.labels: list[str] | None = None
 
         self.frames_since_predict = cfg.stride_frames
         self.prev_frame: np.ndarray | None = None
+        self.prev_normalized: np.ndarray | None = None
         self.motion = 0.0
+        self.motion_norm = 0.0
         self.motion_history: deque[bool] = deque(maxlen=cfg.stability_frames)
         self.is_stable = False
         self.gesture_active = False
@@ -487,7 +607,9 @@ class SignTextDecoder:
         self.last_commit_at = 0.0
         self.empty_frames = 0
         self.active_ratio = 0.0
+        self.last_hand_count = 0
 
+        self.locked = False
         self.hold_label: str | None = None
 
         self.raw_label = "-"
@@ -495,6 +617,7 @@ class SignTextDecoder:
         self.raw_margin = 0.0
         self.smoothed_label = "-"
         self.smoothed_confidence = 0.0
+        self.smoothed_margin = 0.0
         self.top_k: list[tuple[str, float]] = []
         self.latency_ms = 0.0
         self.last_error: str | None = None
@@ -504,79 +627,142 @@ class SignTextDecoder:
         self.commit_count = 0
         self.last_commit_label: str | None = None
 
-    def push(self, keypoints: np.ndarray, hand_count: int) -> np.ndarray | None:
+    def set_labels(self, labels: list[str]) -> None:
+        """Daftar label sesuai urutan kelas model (dari endpoint /labels)."""
+        with self._lock:
+            self.labels = [str(label) for label in labels] if labels else None
+
+    def _reset_votes_locked(self) -> None:
+        self.label_votes.clear()
+        self.streak = 0
+        self.streak_label = "-"
+        self.prob_scores = None
+        self.prob_by_label = None
+        self.smoothed_label = "-"
+        self.smoothed_confidence = 0.0
+        self.smoothed_margin = 0.0
+
+    def _reset_window_locked(self) -> None:
+        self.window.clear()
+        self.window_generation += 1
+        self.frames_since_predict = 0
+        self.active_ratio = 0.0
+
+    def _start_gesture_locked(self) -> None:
+        self.gesture_active = True
+        self.stable_since = None
+        self._reset_window_locked()
+        self._reset_votes_locked()
+
+    def _unlock_locked(self, reason: str) -> None:
+        self.locked = False
+        self.hold_label = None
+        self.status = f"siap ({reason})"
+
+    def push(self, keypoints: np.ndarray, hand_count: int) -> tuple[np.ndarray, int] | None:
         frame = np.asarray(keypoints, dtype=np.float32).reshape(-1)
         if frame.size < FEATURES:
             frame = np.concatenate([frame, np.zeros(FEATURES - frame.size, dtype=np.float32)])
         frame = frame[:FEATURES]
 
         previous = self.prev_frame
-        self.prev_frame = frame.copy()
-        timestamp = time.monotonic()
+        if previous is not None and hand_count > 0 and self.cfg.slot_tracking:
+            frame = reorder_hand_slots(frame, previous)
+
+        normalized = normalize_frame(frame)
+        previous_normalized = self.prev_normalized
+        has_hand = hand_count > 0 and float(np.abs(frame).sum()) > 1e-6
+        had_hand = previous is not None and float(np.abs(previous).sum()) > 1e-6
 
         motion: float | None = None
-        if (
-            previous is not None
-            and hand_count > 0
-            and float(np.abs(frame).sum()) > 1e-6
-            and float(np.abs(previous).sum()) > 1e-6
-        ):
+        motion_norm: float | None = None
+        if has_hand and had_hand and previous_normalized is not None:
             motion = float(np.abs(frame - previous).mean())
+            motion_norm = float(np.abs(normalized - previous_normalized).mean())
+
+        self.prev_frame = frame.copy()
+        self.prev_normalized = normalized
+        timestamp = time.monotonic()
 
         with self._lock:
+            self.last_hand_count = max(0, min(int(hand_count), 2))
             self.window.append(frame)
             self.frames_since_predict += 1
             self.motion = 0.0 if motion is None else motion
+            self.motion_norm = 0.0 if motion_norm is None else motion_norm
             if motion is None:
                 self.stable_since = None
 
-            if hand_count <= 0:
+            if not has_hand:
                 self.empty_frames += 1
                 self.is_stable = False
-                self.gesture_active = False
                 self.stable_since = None
                 self.motion_history.clear()
-                self.history.clear()
-                self.status = "tidak ada tangan"
                 if self.empty_frames >= self.cfg.release_after_empty_frames:
-                    self._release_hold_locked()
-            else:
-                self.empty_frames = 0
-
-            if hand_count > 0 and motion is not None:
-                if motion >= self.cfg.gesture_motion_threshold:
-                    # Gerakan terdeteksi -> mulai sesi gestur baru, buang konsensus lama.
-                    self.gesture_active = True
-                    self.last_motion_at = timestamp
-                    self.is_stable = False
-                    self.stable_since = None
-                    self.motion_history.clear()
-                    self.history.clear()
-                    self.status = "gerakan terdeteksi"
+                    if self.empty_frames == self.cfg.release_after_empty_frames:
+                        self.gesture_active = False
+                        self._reset_votes_locked()
+                        self._reset_window_locked()
+                    # Jangan simpan frame kosong: window hanya berisi gestur yang terlihat.
+                    self.window.clear()
+                    if self.locked and timestamp - self.last_commit_at >= self.cfg.repeat_cooldown:
+                        self._unlock_locked("tangan dilepas")
+                    self.status = "tidak ada tangan"
                 else:
-                    self.motion_history.append(motion <= self.cfg.movement_threshold)
-                    self.is_stable = (
-                        len(self.motion_history) >= self.cfg.stability_frames
-                        and all(self.motion_history)
-                    )
-                    if self.is_stable:
-                        if self.stable_since is None:
-                            self.stable_since = timestamp
-                    else:
-                        self.stable_since = None
+                    # Hilang 1-2 frame (tracking blink) tidak membuang progres gestur.
+                    self.status = "tangan hilang sebentar"
+                return None
 
-                    if self.is_stable and self.gesture_active:
-                        if (
-                            self.cfg.require_gesture
-                            and timestamp - self.last_motion_at > self.cfg.gesture_timeout
-                        ):
-                            self.gesture_active = False
-                            self.history.clear()
-                            self.status = "gestur kadaluarsa"
-                        elif not self.history:
-                            self.status = "tahan gestur..."
-                    elif not self.is_stable:
-                        self.status = "menunggu tangan diam"
+            self.empty_frames = 0
+            moving = motion is not None and motion >= self.cfg.gesture_motion_threshold
+
+            if moving:
+                self.last_motion_at = timestamp
+                self.is_stable = False
+                self.stable_since = None
+                self.motion_history.clear()
+                if self.locked:
+                    if timestamp - self.last_commit_at >= self.cfg.repeat_cooldown:
+                        self._unlock_locked("gestur baru")
+                        self._start_gesture_locked()
+                        self.status = "gerakan terdeteksi"
+                    else:
+                        self.status = "terkunci: tunggu sebentar"
+                else:
+                    if not self.gesture_active:
+                        self._start_gesture_locked()
+                    self.status = "gerakan terdeteksi"
+            else:
+                self.motion_history.append(
+                    motion_norm is not None and motion_norm <= self.cfg.stable_motion_threshold
+                )
+                self.is_stable = (
+                    len(self.motion_history) >= self.cfg.stability_frames
+                    and all(self.motion_history)
+                )
+                if self.is_stable:
+                    if self.stable_since is None:
+                        self.stable_since = timestamp
+                else:
+                    self.stable_since = None
+
+                if self.locked:
+                    self.status = "terkunci: gerakkan / lepas tangan"
+                elif self.gesture_active:
+                    if (
+                        not self.label_votes
+                        and timestamp - self.last_motion_at > self.cfg.gesture_timeout
+                    ):
+                        self.gesture_active = False
+                        self._reset_votes_locked()
+                        self.status = "gestur kadaluarsa"
+                    elif self.is_stable and not self.label_votes:
+                        self.status = "tahan gestur..."
+                elif not self.is_stable:
+                    self.status = "menunggu tangan diam"
+
+            if self.locked:
+                return None
 
             window_len = len(self.window)
             if window_len < self.cfg.min_window_frames:
@@ -585,7 +771,6 @@ class SignTextDecoder:
             active_frames = sum(1 for item in self.window if float(np.abs(item).sum()) > 1e-6)
             self.active_ratio = active_frames / window_len
             if self.active_ratio < self.cfg.min_active_ratio:
-                self.history.clear()
                 self.status = "tangan kurang terlihat"
                 return None
             if self.frames_since_predict < self.cfg.stride_frames:
@@ -598,9 +783,14 @@ class SignTextDecoder:
                 return None
 
             self.frames_since_predict = 0
-            return np.array(self.window, dtype=np.float32, copy=True)
+            return np.array(self.window, dtype=np.float32, copy=True), self.window_generation
 
-    def register_prediction(self, prediction: dict[str, Any], latency_ms: float) -> None:
+    def register_prediction(
+        self,
+        prediction: dict[str, Any],
+        latency_ms: float,
+        generation: int | None = None,
+    ) -> None:
         raw_label = str(prediction.get("label", "-"))
         confidence = float(prediction.get("confidence", 0.0) or 0.0)
         top_k = [
@@ -612,6 +802,10 @@ class SignTextDecoder:
         timestamp = time.monotonic()
 
         with self._lock:
+            if generation is not None and generation != self.window_generation:
+                self.status = "prediksi usang (gestur baru)"
+                return
+
             self.raw_label = raw_label
             self.raw_confidence = confidence
             self.raw_margin = margin
@@ -620,49 +814,47 @@ class SignTextDecoder:
             self.last_error = None
 
             if prediction.get("empty") or raw_label == "-":
-                self.history.clear()
+                self._reset_votes_locked()
                 self.status = "tidak ada gestur"
                 return
-            if confidence < self.cfg.prediction_threshold:
-                self.history.clear()
-                self.status = f"confidence {confidence * 100:.0f}% < {self.cfg.prediction_threshold * 100:.0f}%"
+
+            label, smoothed_conf, smoothed_margin = self._smooth_locked(prediction, raw_label, top_k)
+
+            if self.locked:
+                self.status = "terkunci: gerakkan / lepas tangan"
                 return
-            if margin < self.cfg.top1_margin:
-                self.history.clear()
-                self.status = f"ambigu (margin {margin * 100:.0f}%)"
+            if smoothed_conf < self.cfg.prediction_threshold:
+                self.status = (
+                    f"confidence {smoothed_conf * 100:.0f}% < "
+                    f"{self.cfg.prediction_threshold * 100:.0f}%"
+                )
+                return
+            if smoothed_margin < self.cfg.top1_margin:
+                self.status = f"ambigu (margin {smoothed_margin * 100:.0f}%)"
                 return
             if self.cfg.require_gesture and not self.gesture_active:
-                self.history.clear()
                 self.status = "menunggu gerakan"
                 return
             if self.cfg.require_stable_motion and not self.is_stable:
-                self.history.clear()
                 self.status = "menunggu stabil"
                 return
 
-            self.history.append((raw_label, confidence))
-            self.smoothed_label = raw_label
-            self.smoothed_confidence = sum(score for _, score in self.history) / len(self.history)
+            if label == self.streak_label:
+                self.streak += 1
+            else:
+                self.streak_label = label
+                self.streak = 1
+            self.label_votes.append(label)
+            share = self.label_votes.count(label) / max(1, len(self.label_votes))
 
-            labels = {label for label, _ in self.history}
-            if len(labels) != 1:
-                self.history.clear()
-                self.history.append((raw_label, confidence))
-                self.status = "label berubah, ulangi"
+            if self.streak < self.cfg.stable_predictions:
+                self.status = f"stabil {self.streak}/{self.cfg.stable_predictions}"
                 return
-
-            if len(self.history) < self.required_votes:
-                self.status = f"konsensus {len(self.history)}/{self.required_votes}"
+            if len(self.label_votes) < self.required_votes:
+                self.status = f"konsensus {len(self.label_votes)}/{self.required_votes}"
                 return
-
-            if self.smoothed_confidence < self.cfg.prediction_threshold:
-                self.history.clear()
-                self.status = "confidence rata-rata rendah"
-                return
-
-            stable_label = raw_label
-            if stable_label == self.hold_label:
-                self.status = "sudah dikomit"
+            if share < self.cfg.min_vote_share:
+                self.status = f"vote {share * 100:.0f}% < {self.cfg.min_vote_share * 100:.0f}%"
                 return
             if timestamp - self.last_commit_at < self.cfg.commit_cooldown:
                 self.status = "cooldown"
@@ -672,22 +864,77 @@ class SignTextDecoder:
             if held_seconds < self.cfg.min_hold_seconds:
                 self.status = f"tahan {held_seconds:.1f}/{self.cfg.min_hold_seconds:.1f}s"
                 return
-            if self.cfg.require_stable_motion and not self.is_stable:
-                self.history.clear()
-                self.status = "menunggu stabil"
-                return
 
-            self._commit_locked(stable_label)
-            self.hold_label = stable_label
+            self._commit_locked(label)
+            self.hold_label = label
             self.last_commit_at = timestamp
-            self.history.clear()
+            self.locked = bool(self.cfg.lock_after_commit)
             self.gesture_active = False
             self.is_stable = False
+            self.stable_since = None
             self.motion_history.clear()
-            self.status = f"dikomit: {stable_label}"
+            self._reset_window_locked()
+            self._reset_votes_locked()
+            # Tetap tampilkan label terakhir yang telah dikomit.
+            self.smoothed_label = label
+            self.smoothed_confidence = smoothed_conf
+            self.smoothed_margin = smoothed_margin
+            self.status = f"dikomit: {label}"
 
-    def _release_hold_locked(self) -> None:
-        self.hold_label = None
+    def _smooth_locked(
+        self,
+        prediction: dict[str, Any],
+        raw_label: str,
+        top_k: list[tuple[str, float]],
+    ) -> tuple[str, float, float]:
+        """EMA probabilitas antar-prediksi supaya label tidak berubah karena noise 1 frame.
+
+        Model service mengirim `scores` lengkap (urutan kelas sama dengan /labels).
+        Kalau `scores` tidak ada (service lama), smoothing dilakukan pada top-k saja.
+        """
+        alpha = self.cfg.prob_smooth_alpha
+        scores = prediction.get("scores") or []
+        label = raw_label
+        confidence = float(prediction.get("confidence", 0.0) or 0.0)
+        second = 0.0
+
+        if scores and self.labels and len(self.labels) == len(scores):
+            array = np.asarray(scores, dtype=np.float64)
+            if self.prob_scores is None or self.prob_scores.shape != array.shape:
+                self.prob_scores = array.copy()
+            else:
+                self.prob_scores = alpha * array + (1.0 - alpha) * self.prob_scores
+            total = float(self.prob_scores.sum())
+            if total > 0:
+                self.prob_scores = self.prob_scores / total
+            order = np.argsort(self.prob_scores)[::-1]
+            best = int(order[0])
+            runner = int(order[1]) if len(order) > 1 else best
+            label = str(self.labels[best])
+            confidence = float(self.prob_scores[best])
+            second = float(self.prob_scores[runner]) if runner != best else 0.0
+        else:
+            if self.prob_by_label is None:
+                self.prob_by_label = {}
+            for name in list(self.prob_by_label):
+                self.prob_by_label[name] *= 1.0 - alpha
+            for name, value in top_k:
+                self.prob_by_label[name] = self.prob_by_label.get(name, 0.0) + alpha * value
+            total = sum(self.prob_by_label.values())
+            if total > 0:
+                for name in self.prob_by_label:
+                    self.prob_by_label[name] /= total
+            ranked = sorted(self.prob_by_label.items(), key=lambda item: item[1], reverse=True)
+            if ranked:
+                label = ranked[0][0]
+                confidence = float(ranked[0][1])
+                second = float(ranked[1][1]) if len(ranked) > 1 else 0.0
+
+        margin = max(0.0, confidence - second)
+        self.smoothed_label = label
+        self.smoothed_confidence = confidence
+        self.smoothed_margin = margin
+        return label, confidence, margin
 
     def _commit_locked(self, label: str) -> None:
         label = label.strip()
@@ -725,14 +972,14 @@ class SignTextDecoder:
     def clear(self) -> None:
         with self._lock:
             self.text = ""
-            self.history.clear()
+            self._reset_votes_locked()
+            self._reset_window_locked()
+            self.locked = False
             self.hold_label = None
             self.gesture_active = False
             self.is_stable = False
             self.stable_since = None
             self.motion_history.clear()
-            self.smoothed_label = "-"
-            self.smoothed_confidence = 0.0
             self.raw_margin = 0.0
             self.status = "menunggu gerakan"
 
@@ -744,21 +991,49 @@ class SignTextDecoder:
                 "raw_margin": self.raw_margin,
                 "smoothed_label": self.smoothed_label,
                 "smoothed_confidence": self.smoothed_confidence,
+                "smoothed_margin": self.smoothed_margin,
                 "top_k": list(self.top_k),
                 "latency_ms": self.latency_ms,
                 "text": self.text,
                 "window_len": len(self.window),
                 "active_ratio": self.active_ratio,
+                "hand_count": self.last_hand_count,
                 "motion": self.motion,
+                "motion_norm": self.motion_norm,
                 "stable": self.is_stable,
                 "gesture_active": self.gesture_active,
-                "progress": len(self.history),
+                "locked": self.locked,
+                "progress": self.streak,
                 "required": self.required_votes,
+                "votes": list(self.label_votes),
                 "status": self.status,
                 "error": self.last_error,
                 "commits": self.commit_count,
                 "last_commit": self.last_commit_label,
             }
+
+
+def format_prediction_debug(
+    prediction: dict[str, Any],
+    snapshot: dict[str, Any],
+    normalized: Any,
+    latency_ms: float,
+) -> str:
+    top_k = prediction.get("top_k") or []
+    candidates = [
+        f"{item.get('label', '?')}:{float(item.get('confidence', 0.0) or 0.0):.2f}"
+        for item in top_k[:5]
+    ]
+    top1 = float(prediction.get("confidence", 0.0) or 0.0)
+    top2 = float(top_k[1].get("confidence", 0.0) or 0.0) if len(top_k) > 1 else 0.0
+    margin = top1 - top2
+    return (
+        f"[PREDIKSI] top1={prediction.get('label', '?')}:{top1:.2f} | "
+        f"top-k={', '.join(candidates) or '?'} | margin={margin:.2f} | "
+        f"hands={snapshot.get('hand_count', 0)} | "
+        f"active={snapshot.get('active_ratio', 0.0):.2f} | "
+        f"normalized={normalized!s} | latency={latency_ms:.0f} ms"
+    )
 
 
 class PredictionWorker(threading.Thread):
@@ -772,11 +1047,13 @@ class PredictionWorker(threading.Thread):
         self._lock = threading.Lock()
         self._event = threading.Event()
         self._latest: np.ndarray | None = None
+        self._generation = 0
         self._stop = False
 
-    def submit(self, sequence: np.ndarray) -> None:
+    def submit(self, sequence: np.ndarray, generation: int) -> None:
         with self._lock:
             self._latest = sequence
+            self._generation = generation
         self._event.set()
 
     def stop(self) -> None:
@@ -793,6 +1070,7 @@ class PredictionWorker(threading.Thread):
 
             with self._lock:
                 sequence = self._latest
+                generation = self._generation
                 self._latest = None
             if sequence is None:
                 continue
@@ -805,16 +1083,16 @@ class PredictionWorker(threading.Thread):
                 continue
 
             latency_ms = (time.perf_counter() - started) * 1000.0
-            self._decoder.register_prediction(prediction, latency_ms)
+            self._decoder.register_prediction(prediction, latency_ms, generation)
 
             if self._debug:
-                top = ", ".join(
-                    f"{item.get('label')}:{float(item.get('confidence', 0.0)):.2f}"
-                    for item in (prediction.get("top_k") or [])[:3]
-                )
                 print(
-                    f"[PREDIKSI] {prediction.get('label')} "
-                    f"{float(prediction.get('confidence', 0.0)) * 100:.1f}% | {top} | {latency_ms:.0f} ms"
+                    format_prediction_debug(
+                        prediction,
+                        self._decoder.snapshot(),
+                        self._client.info.get("normalize", "?"),
+                        latency_ms,
+                    )
                 )
 
 
@@ -871,9 +1149,14 @@ def draw_hud(image: np.ndarray, snap: dict[str, Any], cfg: Config, fps: float, b
 
     label = snap["smoothed_label"] if snap["smoothed_label"] != "-" else "-"
     confidence = snap["smoothed_confidence"] * 100.0
+    marker = ""
+    if snap.get("locked"):
+        marker = "  [terkunci]"
+    elif snap.get("stable"):
+        marker = "  [stabil]"
     cv2.putText(
         image,
-        f"Kandidat: {label} ({confidence:.0f}%)",
+        f"Kandidat: {label} ({confidence:.0f}%){marker}",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
@@ -884,10 +1167,11 @@ def draw_hud(image: np.ndarray, snap: dict[str, Any], cfg: Config, fps: float, b
     cv2.putText(
         image,
         f"raw {snap['raw_label']} {snap['raw_confidence'] * 100:.0f}% | margin {snap['raw_margin'] * 100:.0f}% | "
+        f"gerak {snap.get('motion', 0.0):.3f}/{snap.get('motion_norm', 0.0):.3f} | "
         f"{snap['latency_ms']:.0f} ms | FPS {fps:.0f} | {backend}",
         (10, 56),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
+        0.45,
         (255, 255, 255),
         1,
         cv2.LINE_AA,
@@ -1015,6 +1299,7 @@ def run_camera(cfg: Config) -> None:
     session_id = str(uuid.uuid4())
     landmarker = create_landmarker(cfg, session_id)
     decoder = SignTextDecoder(cfg)
+    decoder.set_labels(client.labels)
     worker = PredictionWorker(client, decoder, cfg.debug)
     worker.start()
 
@@ -1033,9 +1318,9 @@ def run_camera(cfg: Config) -> None:
                 break
 
             keypoints, hand_count, results = landmarker.process(frame, timestamps.next())
-            request_sequence = decoder.push(keypoints, hand_count)
-            if request_sequence is not None:
-                worker.submit(request_sequence)
+            request = decoder.push(keypoints, hand_count)
+            if request is not None:
+                worker.submit(*request)
 
             display = cv2.flip(frame, 1)
             if results is not None:
@@ -1080,6 +1365,7 @@ def run_video(cfg: Config, video_path: Path, show: bool, max_frames: int | None)
     session_id = str(uuid.uuid4())
     landmarker = create_landmarker(cfg, session_id)
     decoder = SignTextDecoder(cfg)
+    decoder.set_labels(client.labels)
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -1097,25 +1383,26 @@ def run_video(cfg: Config, video_path: Path, show: bool, max_frames: int | None)
 
             timestamp_ms = int(index / source_fps * 1000)
             keypoints, hand_count, results = landmarker.process(frame, timestamp_ms)
-            request_sequence = decoder.push(keypoints, hand_count)
+            request = decoder.push(keypoints, hand_count)
 
-            if request_sequence is not None:
+            if request is not None:
+                sequence, generation = request
                 started = time.perf_counter()
                 try:
-                    prediction = client.predict(request_sequence)
+                    prediction = client.predict(sequence)
                 except Exception as exc:
                     decoder.register_error(str(exc))
                 else:
                     latency_ms = (time.perf_counter() - started) * 1000.0
-                    decoder.register_prediction(prediction, latency_ms)
+                    decoder.register_prediction(prediction, latency_ms, generation)
                     if cfg.debug:
-                        top = ", ".join(
-                            f"{item.get('label')}:{float(item.get('confidence', 0.0)):.2f}"
-                            for item in (prediction.get("top_k") or [])[:3]
-                        )
                         print(
-                            f"[PREDIKSI] {prediction.get('label')} "
-                            f"{float(prediction.get('confidence', 0.0)) * 100:.1f}% | {top}"
+                            format_prediction_debug(
+                                prediction,
+                                decoder.snapshot(),
+                                client.info.get("normalize", "?"),
+                                latency_ms,
+                            )
                         )
 
             if show:

@@ -59,6 +59,17 @@ def extract_keypoints(results) -> np.ndarray:
     return np.zeros(MAX_FEATURES, dtype=np.float32)
 
 
+def get_handedness_labels(results) -> list[str]:
+    """Return MediaPipe handedness in the same order as hand_landmarks."""
+    categories = getattr(results, "handedness", None) or []
+    labels: list[str] = []
+    for category_list in categories[:MAX_HANDS]:
+        category = category_list[0] if category_list else None
+        label = getattr(category, "display_name", None) or getattr(category, "category_name", None)
+        labels.append(str(label or "?"))
+    return labels
+
+
 def build_landmarker():
     if not MODEL_PATH.exists():
         raise RuntimeError(f"HandLandmarker model not found at {MODEL_PATH}")
@@ -129,7 +140,16 @@ atexit.register(close_all_sessions)
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "max_hands": MAX_HANDS,
+        "features": MAX_FEATURES,
+        "thresholds": {
+            "detection": HAND_DETECTION_CONFIDENCE,
+            "presence": HAND_PRESENCE_CONFIDENCE,
+            "tracking": HAND_TRACKING_CONFIDENCE,
+        },
+    }
 
 
 @app.post("/extract")
@@ -165,6 +185,9 @@ async def extract(file: UploadFile = File(...), max_frames: int = 90):
             frame_timestamp_ms = int((idx / fps) * 1000)
             results = landmarker.detect_for_video(mp_image, frame_timestamp_ms)
             keypoints = extract_keypoints(results)
+            handedness = get_handedness_labels(results)
+            if handedness:
+                print(f"[DEBUG] handedness={handedness} | slots={len(handedness)}")
             frames.append(keypoints.tolist())
             if getattr(results, "hand_landmarks", None):
                 active_frames += 1
@@ -238,12 +261,16 @@ def session_frame(request: SessionFrameRequest):
 
     keypoints = extract_keypoints(results)
     hand_count = min(len(results.hand_landmarks), MAX_HANDS) if getattr(results, "hand_landmarks", None) else 0
+    handedness = get_handedness_labels(results)
+    if handedness:
+        print(f"[DEBUG] handedness={handedness} | slots={len(handedness)}")
 
     return {
         "session_id": request.session_id,
         "timestamp_ms": timestamp_ms,
         "keypoints": keypoints.tolist(),
         "hand_count": hand_count,
+        "handedness": handedness,
         "active": hand_count > 0,
         "width": int(frame.shape[1]),
         "height": int(frame.shape[0]),
