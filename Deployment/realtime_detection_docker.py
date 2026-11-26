@@ -459,11 +459,14 @@ class SignTextDecoder:
         active = hand_count > 0 and float(np.abs(frame).sum()) > 1e-6
         now = time.monotonic()
         with self._lock:
-            self.window.append(frame)
-            self.frames_since_predict += 1
             previous = self.prev_frame
             self.prev_frame = frame if active else None
             if not active:
+                # Treat tracking loss as a segment boundary: never join unrelated
+                # samples around a gap and do not infer on an all-empty sequence.
+                self.window.clear()
+                self.frames_since_predict = 0
+                self.active_ratio = 0.0
                 self.empty_frames += 1
                 self.is_stable = False
                 self.gesture_active = False
@@ -473,35 +476,36 @@ class SignTextDecoder:
                 self.status = "tidak ada tangan"
                 if self.empty_frames >= self.cfg.release_after_empty_frames:
                     self.hold_label = None
+                return None
+
+            self.empty_frames = 0
+            self.window.append(frame)
+            self.frames_since_predict += 1
+            # A first tracked frame follows a no-hand observation. Treat appearing
+            # hand landmarks as gesture onset so static held signs can pass the
+            # optional REQUIRE_GESTURE gate without needing another movement.
+            motion = float(np.abs(frame - previous).mean()) if previous is not None else float(np.abs(frame).mean())
+            self.motion = motion
+            if motion >= self.cfg.gesture_motion_threshold:
+                self.gesture_active = True
+                self.last_motion_at = now
+                self.history.clear()
+                self.motion_history.clear()
+                self.stable_since = None
+            self.motion_history.append(motion <= self.cfg.movement_threshold)
+            self.is_stable = len(self.motion_history) == self.cfg.stability_frames and all(self.motion_history)
+            if self.is_stable:
+                if self.stable_since is None:
+                    self.stable_since = now
             else:
-                self.empty_frames = 0
-                motion = float(np.abs(frame - previous).mean()) if previous is not None else 0.0
-                self.motion = motion
-                if motion >= self.cfg.gesture_motion_threshold:
-                    self.gesture_active = True
-                    self.last_motion_at = now
-                    self.history.clear()
-                    self.motion_history.clear()
-                    self.stable_since = None
-                self.motion_history.append(motion <= self.cfg.movement_threshold)
-                self.is_stable = len(self.motion_history) == self.cfg.stability_frames and all(self.motion_history)
-                if self.is_stable:
-                    if self.stable_since is None:
-                        self.stable_since = now
-                else:
-                    self.stable_since = None
-                self.status = "tangan stabil" if self.is_stable else "mendeteksi gesture"
+                self.stable_since = None
+            self.status = "tangan stabil" if self.is_stable else "mendeteksi gesture"
 
             if len(self.window) < self.cfg.min_window_frames or self.frames_since_predict < self.cfg.stride_frames:
                 return None
-            active_count = sum(float(np.abs(item).sum()) > 1e-6 for item in self.window)
-            self.active_ratio = active_count / len(self.window)
-            if self.active_ratio < self.cfg.min_active_ratio:
-                self.history.clear()
-                self.status = "tangan kurang terlihat"
-                return None
-            # We always infer on a visible sliding window. Requiring movement or
-            # perfect stillness here causes static signs / continuous signs to vanish.
+            self.active_ratio = 1.0
+            # Always infer on a visible sliding window. Requiring motion or stillness
+            # here would suppress valid static signs and continuous signs.
             self.frames_since_predict = 0
             return np.stack(tuple(self.window)).astype(np.float32, copy=False)
 
@@ -534,10 +538,12 @@ class SignTextDecoder:
                 return
             if confidence < self.cfg.prediction_threshold:
                 self.history.clear()
+                self.smoothed_label, self.smoothed_confidence = "-", 0.0
                 self.status = f"confidence rendah ({confidence:.0%})"
                 return
             if len(top_k) > 1 and margin < self.cfg.top1_margin:
                 self.history.clear()
+                self.smoothed_label, self.smoothed_confidence = "-", 0.0
                 self.status = f"prediksi ambigu (margin {margin:.0%})"
                 return
             self.history.append((raw_label, confidence))
@@ -559,6 +565,18 @@ class SignTextDecoder:
             if now - self.last_commit_at < self.cfg.commit_cooldown:
                 self.status = "cooldown"
                 return
+            if self.cfg.require_gesture:
+                if not self.gesture_active:
+                    self.status = "menunggu gerakan gesture"
+                    return
+                if self.cfg.gesture_timeout and now - self.last_motion_at > self.cfg.gesture_timeout:
+                    self.gesture_active = False
+                    self.history.clear()
+                    self.status = "gesture timeout; mulai ulang gerakan"
+                    return
+            if self.cfg.require_stable_motion and not self.is_stable:
+                self.status = "menunggu tangan stabil"
+                return
             if self.cfg.min_hold_seconds and self.stable_since is not None and now - self.stable_since < self.cfg.min_hold_seconds:
                 self.status = "tahan gesture sebentar"
                 return
@@ -573,10 +591,17 @@ class SignTextDecoder:
         if not label:
             return
         if len(label) == 1 and label.isalpha():
-            self.text += label.upper()
+            text = self.text + label.upper()
         else:
-            self.text = self.text.rstrip() + (" " if self.text.strip() else "") + label + " "
-        self.text = self.text[-self.cfg.text_limit:]
+            text = self.text.rstrip() + (" " if self.text.strip() else "") + label + " "
+        if len(text) > self.cfg.text_limit:
+            # Trim only at a word boundary; if one token itself exceeds the limit,
+            # retain its tail rather than exceeding the configured memory bound.
+            trimmed = text[-self.cfg.text_limit:]
+            first_space = trimmed.find(" ")
+            self.text = trimmed[first_space + 1:] if first_space >= 0 else trimmed
+        else:
+            self.text = text
         self.commit_count += 1
         self.last_commit_label = label
         print(f"[TEKS] +{label} -> {self.text.strip()}")
@@ -590,24 +615,49 @@ class SignTextDecoder:
         with self._lock:
             if self.text and not self.text.endswith(" "):
                 self.text += " "
+            self.clear_temporal_state()
 
     def backspace(self) -> None:
         with self._lock:
             self.text = self.text.rstrip()[:-1]
+            self.clear_temporal_state()
+
+    def reset_decoder_state(self) -> None:
+        """Clear temporal predictions after manual text editing."""
+        with self._lock:
+            self.history.clear()
+            self.smoothed_label, self.smoothed_confidence = "-", 0.0
+            self.status = "menunggu tangan"
+
+    def clear_temporal_state(self, clear_hold: bool = False) -> None:
+        """Start a fresh inference segment while optionally preserving held-label state."""
+        with self._lock:
+            self.window.clear()
+            self.frames_since_predict = 0
+            self.prev_frame = None
+            self.motion = 0.0
+            self.motion_history.clear()
+            self.is_stable = False
+            self.gesture_active = False
+            self.stable_since = None
+            self.last_motion_at = 0.0
+            self.empty_frames = 0
+            self.active_ratio = 0.0
+            self.history.clear()
+            self.smoothed_label, self.smoothed_confidence = "-", 0.0
+            self.raw_label, self.raw_confidence, self.raw_margin = "-", 0.0, 0.0
+            self.top_k = []
+            self.last_error = None
+            self.status = "menunggu tangan"
+            if clear_hold:
+                self.hold_label = None
 
     def clear(self) -> None:
         with self._lock:
             self.text = ""
-            self.history.clear()
-            self.hold_label = None
-            self.gesture_active = False
-            self.is_stable = False
-            self.stable_since = None
-            self.motion_history.clear()
-            self.smoothed_label = "-"
-            self.smoothed_confidence = 0.0
-            self.raw_margin = 0.0
-            self.status = "menunggu tangan"
+            self.clear_temporal_state(clear_hold=True)
+            self.commit_count = 0
+            self.last_commit_label = None
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -632,13 +682,28 @@ class PredictionWorker(threading.Thread):
         self._client, self._decoder, self._debug = client, decoder, debug
         self._lock = threading.Lock()
         self._event = threading.Event()
-        self._latest: np.ndarray | None = None
+        self._latest: tuple[int, np.ndarray] | None = None
+        self._generation = 0
+        self._active_generation: int | None = None
         self._shutdown = False  # Do not shadow Thread._stop(), which join() calls.
 
     def submit(self, sequence: np.ndarray) -> None:
         with self._lock:
-            self._latest = sequence.copy()
-        self._event.set()
+            # Keep only the newest window. If an older request is still running,
+            # queue this window under the current generation; its completion will
+            # wake the worker and the stale result will be discarded.
+            generation = self._generation
+            self._latest = (generation, sequence.copy())
+            if self._active_generation is None:
+                self._event.set()
+
+    def invalidate(self, reset_decoder: bool = False, clear_hold: bool = False) -> None:
+        """Invalidate stale results without blocking the next gesture segment."""
+        with self._lock:
+            self._generation += 1
+            self._latest = None
+            if reset_decoder:
+                self._decoder.clear_temporal_state(clear_hold=clear_hold)
 
     def stop(self) -> None:
         self._shutdown = True
@@ -655,19 +720,49 @@ class PredictionWorker(threading.Thread):
                 return
             self._event.clear()
             with self._lock:
-                sequence, self._latest = self._latest, None
-            if sequence is None:
+                pending, self._latest = self._latest, None
+                if pending is not None:
+                    self._active_generation = pending[0]
+            if pending is None:
                 continue
+            generation, sequence = pending
             started = time.perf_counter()
             try:
                 result = self._client.predict(sequence)
                 latency = (time.perf_counter() - started) * 1000.0
-                self._decoder.register_prediction(result, latency)
+                with self._lock:
+                    current = generation == self._generation
+                    if self._active_generation == generation:
+                        self._active_generation = None
+                    pending_latest = self._latest
+                    if pending_latest is not None:
+                        self._event.set()
+                    if not current:
+                        continue
+                    self._decoder.register_prediction(result, latency)
                 if self._debug:
                     print(f"[PREDIKSI] {result.get('label')} "
                           f"{float(result.get('confidence', 0.0)):.1%} | {latency:.0f} ms")
             except Exception as exc:
-                self._decoder.register_error(str(exc))
+                with self._lock:
+                    current = generation == self._generation
+                    if self._active_generation == generation:
+                        self._active_generation = None
+                    pending_latest = self._latest
+                    if pending_latest is not None:
+                        self._event.set()
+                if current:
+                    self._decoder.register_error(str(exc))
+
+
+def _draw_points(image: np.ndarray, points: list[tuple[int, int]]) -> None:
+    height, width = image.shape[:2]
+    points = [(int(np.clip(x, 0, width - 1)), int(np.clip(y, 0, height - 1))) for x, y in points]
+    for start, end in HAND_CONNECTIONS:
+        cv2.line(image, points[start], points[end], (0, 255, 0), 2, cv2.LINE_AA)
+    for point in points:
+        cv2.circle(image, point, 4, (0, 0, 255), -1, cv2.LINE_AA)
+        cv2.circle(image, point, 6, (255, 255, 255), 1, cv2.LINE_AA)
 
 
 def draw_keypoints(image: np.ndarray, keypoints: np.ndarray, mirror: bool = True) -> None:
@@ -676,25 +771,21 @@ def draw_keypoints(image: np.ndarray, keypoints: np.ndarray, mirror: bool = True
     height, width = image.shape[:2]
     for offset in (0, 63):
         hand = np.asarray(keypoints[offset:offset + 63], dtype=np.float32).reshape(21, 3)
-        if float(np.abs(hand).sum()) < 1e-6:
+        if not np.isfinite(hand).all() or float(np.abs(hand).sum()) < 1e-6:
             continue
         points = [(int(((1.0 - x) if mirror else x) * width), int(y * height)) for x, y, _ in hand]
-        for start, end in HAND_CONNECTIONS:
-            cv2.line(image, points[start], points[end], (0, 255, 0), 2, cv2.LINE_AA)
-        for point in points:
-            cv2.circle(image, point, 4, (0, 0, 255), -1, cv2.LINE_AA)
-            cv2.circle(image, point, 6, (255, 255, 255), 1, cv2.LINE_AA)
+        _draw_points(image, points)
 
 
 def draw_mediapipe_hands(image: np.ndarray, results: Any, mirror: bool = True) -> None:
+    height, width = image.shape[:2]
     for hand in (getattr(results, "hand_landmarks", None) or [])[:2]:
-        height, width = image.shape[:2]
+        if len(hand) != 21:
+            continue
+        if not all(np.isfinite((lm.x, lm.y, lm.z)).all() for lm in hand):
+            continue
         points = [(int(((1.0 - lm.x) if mirror else lm.x) * width), int(lm.y * height)) for lm in hand]
-        for start, end in HAND_CONNECTIONS:
-            cv2.line(image, points[start], points[end], (0, 255, 0), 2, cv2.LINE_AA)
-        for point in points:
-            cv2.circle(image, point, 4, (0, 0, 255), -1, cv2.LINE_AA)
-            cv2.circle(image, point, 6, (255, 255, 255), 1, cv2.LINE_AA)
+        _draw_points(image, points)
 
 
 def wrap_text(text: str, width: int, max_lines: int) -> list[str]:
@@ -757,15 +848,31 @@ def open_camera(cfg: Config) -> cv2.VideoCapture:
     raise RuntimeError("Kamera tidak bisa dibuka. Coba --camera 1 atau periksa izin kamera.")
 
 
-def _handle_key(key: int, decoder: SignTextDecoder) -> bool:
+def _handle_key(key: int, decoder: SignTextDecoder, worker: PredictionWorker | None = None) -> bool:
     if key == ord("q"):
         return False
     if key == 32:
+        if worker is not None:
+            worker.invalidate(reset_decoder=True)
+        else:
+            decoder.clear_temporal_state()
         decoder.add_space()
-    elif key in (8, 127, 255):
+    elif key in (8, 127):
+        # On Windows, waitKey(1) & 0xFF returns 255 when no key is pressed.
+        # Do not treat 255 as Backspace or the temporal window resets every frame.
+        if worker is not None:
+            worker.invalidate(reset_decoder=True)
+        else:
+            decoder.clear_temporal_state()
         decoder.backspace()
     elif key in (ord("c"), ord("C")):
-        decoder.clear()
+        if worker is not None:
+            worker.invalidate(reset_decoder=True, clear_hold=True)
+            # invalidate() clears the inference segment, while clear() also
+            # removes the text already committed to the output buffer.
+            decoder.clear()
+        else:
+            decoder.clear()
     return True
 
 
@@ -790,6 +897,10 @@ def run_camera(cfg: Config) -> None:
                 print("[WARNING] Frame kamera tidak terbaca, keluar.")
                 break
             points, hands, results = landmarker.process(frame, timestamps.next())
+            if hands == 0:
+                # Invalidate inference results from the previous visible segment,
+                # but let decoder.push() count consecutive empty-hand frames.
+                worker.invalidate()
             sequence = decoder.push(points, hands)
             if sequence is not None:
                 worker.submit(sequence)
@@ -804,7 +915,7 @@ def run_camera(cfg: Config) -> None:
                 fps, count, started = count / (now - started), 0, now
             draw_hud(display, decoder.snapshot(), cfg, fps, landmarker.backend)
             cv2.imshow("Deteksi BISINDO - Teks Realtime", display)
-            if not _handle_key(cv2.waitKey(1) & 0xFF, decoder):
+            if not _handle_key(cv2.waitKey(1) & 0xFF, decoder, worker):
                 break
     finally:
         if worker is not None:
