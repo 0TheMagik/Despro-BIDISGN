@@ -57,3 +57,28 @@ python speech_to_text.py
 The default language is Indonesian (`id-ID`). Use `--language en-US` for
 English, or save recognized phrases with `--output transcript.txt`. If the
 wrong microphone is selected, pass its device number with `--device-index`.
+
+## T-Glass (kacamata pintar)
+
+[`firmware/TGlass_BISINDO/TGlass_BISINDO.ino`](firmware/TGlass_BISINDO/TGlass_BISINDO.ino)
+menampilkan teks hasil translasi BISINDO ke layar T-Glass, dan menyediakan mode
+speech-to-text memakai mikrofon PDM bawaan kacamata.
+
+1. Jalankan bridge di PC (sekaligus melayani speech recognition):
+
+   ```bash
+   python -m pip install -r requirements-speech.txt
+   python Deployment/glass_bridge.py
+   ```
+
+2. Kirim teks deteksi isyarat ke bridge:
+
+   ```bash
+   python Deployment/realtime_detection_docker.py --glass-url http://<IP-PC>:8765
+   ```
+
+3. Upload sketch ke T-Glass sesuai
+   [`firmware/TGlass_BISINDO/README.md`](firmware/TGlass_BISINDO/README.md).
+
+Kontrol tombol sentuh: klik = ganti mode ISYARAT/SUARA, klik 2x = hapus teks,
+tekan lama = info WiFi/server/mikrofon, klik 3x = sambung ulang WiFi.
