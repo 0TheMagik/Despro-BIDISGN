@@ -224,7 +224,14 @@ class Predictor:
             labels = checkpoint.get("actions")
             seq_len = int(checkpoint.get("video_frames", 90))
             feats = int(checkpoint.get("features", 126))
-            normalize = bool(checkpoint.get("normalize", env_bool("NORMALIZE_SEQUENCE", True)))
+            checkpoint_normalize = checkpoint.get("normalize")
+            # Checkpoint lama mungkin tidak menyimpan metadata normalisasi.
+            # Dalam kasus itu, hormati NORMALIZE_SEQUENCE dari environment.
+            normalize = (
+                env_bool("NORMALIZE_SEQUENCE", True)
+                if checkpoint_normalize is None
+                else bool(checkpoint_normalize)
+            )
         else:  # state_dict polos
             state_dict = checkpoint
             config = {}
@@ -315,11 +322,31 @@ class Predictor:
             raise HTTPException(status_code=503, detail="Model belum siap")
 
         prepared: list[np.ndarray] = []
-        empty_flags: list[bool] = []
+        diagnostics: list[dict[str, Any]] = []
         for instance in instances:
-            sequence = self.prepare(instance)
-            empty_flags.append(bool(np.abs(sequence).sum() < 1e-6))
-            prepared.append(sequence)
+            raw_array = np.asarray(instance, dtype=np.float32)
+            if raw_array.ndim == 1:
+                raw_array = raw_array.reshape(1, -1)
+            if raw_array.ndim == 2 and raw_array.shape[0] > 0:
+                usable = raw_array[:, : self.features]
+                if usable.shape[1] < self.features:
+                    usable = np.pad(usable, ((0, 0), (0, self.features - usable.shape[1])))
+                hands_per_frame = usable.reshape(usable.shape[0], 2, 63)
+                hand_count = int(np.any(np.abs(hands_per_frame).sum(axis=2) > 1e-6, axis=0).sum())
+                active_frames = int(np.any(np.abs(usable).sum(axis=1) > 1e-6, axis=0).sum())
+                input_frame_count = int(raw_array.shape[0])
+            else:
+                hand_count = 0
+                active_frames = 0
+                input_frame_count = 0
+            diagnostics.append(
+                {
+                    "input_frame_count": input_frame_count,
+                    "active_frames": active_frames,
+                    "hand_count": hand_count,
+                }
+            )
+            prepared.append(self.prepare(instance))
 
         batch = np.stack(prepared, axis=0)
 
@@ -333,23 +360,32 @@ class Predictor:
                 probabilities = np.asarray(self.model.predict(batch, verbose=0), dtype=np.float32)
 
         results: list[dict[str, Any]] = []
-        for index, is_empty in enumerate(empty_flags):
+        for index, sequence_diagnostics in enumerate(diagnostics):
             scores = probabilities[index]
+            is_empty = sequence_diagnostics["active_frames"] == 0
             if is_empty:
-                results.append(
-                    {
-                        "label": "-",
-                        "label_index": -1,
-                        "confidence": 0.0,
-                        "top_k": [],
-                        "scores": [],
-                        "empty": True,
-                    }
+                result = {
+                    "label": "-",
+                    "label_index": -1,
+                    "confidence": 0.0,
+                    "top_k": [],
+                    "scores": [],
+                    "empty": True,
+                    **sequence_diagnostics,
+                }
+                results.append(result)
+                print(
+                    f"[DEBUG] top1=-:0.00 | top2=-:0.00 | margin=0.00 | "
+                    f"hands={sequence_diagnostics['hand_count']} | "
+                    f"active_frames={sequence_diagnostics['active_frames']} | "
+                    f"normalized={self.normalize}"
                 )
                 continue
 
             best_index = int(np.argmax(scores))
             top_indices = np.argsort(scores)[::-1][: min(5, len(scores))]
+            runner_up = float(scores[int(top_indices[1])]) if len(top_indices) > 1 else 0.0
+            margin = float(scores[best_index]) - runner_up
             top_k = [
                 {
                     "label": self.labels[int(i)] if int(i) < len(self.labels) else str(i),
@@ -357,15 +393,26 @@ class Predictor:
                 }
                 for i in top_indices
             ]
-            results.append(
-                {
-                    "label": self.labels[best_index] if best_index < len(self.labels) else str(best_index),
-                    "label_index": best_index,
-                    "confidence": float(scores[best_index]),
-                    "top_k": top_k,
-                    "scores": [float(value) for value in scores],
-                    "empty": False,
-                }
+            result = {
+                "label": self.labels[best_index] if best_index < len(self.labels) else str(best_index),
+                "label_index": best_index,
+                "confidence": float(scores[best_index]),
+                "runner_up_confidence": runner_up,
+                "margin": margin,
+                "top_k": top_k,
+                "scores": [float(value) for value in scores],
+                "empty": False,
+                **sequence_diagnostics,
+            }
+            results.append(result)
+            top1 = top_k[0]
+            top2 = top_k[1] if len(top_k) > 1 else {"label": "-", "confidence": 0.0}
+            print(
+                f"[DEBUG] top1={top1['label']}:{top1['confidence']:.2f} | "
+                f"top2={top2['label']}:{top2['confidence']:.2f} | margin={margin:.2f} | "
+                f"hands={sequence_diagnostics['hand_count']} | "
+                f"active_frames={sequence_diagnostics['active_frames']} | "
+                f"normalized={self.normalize}"
             )
         return results
 
