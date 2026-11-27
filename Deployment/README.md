@@ -72,31 +72,31 @@ set MODEL_URL=http://127.0.0.1:8002
 | ---------------------------- | ------- | -------------------------------------------------------------- |
 | `LANDMARK_BACKEND`           | `auto`  | `local` (MediaPipe di client), `docker` (service), atau `auto`  |
 | `WINDOW_FRAMES`              | 36      | Jumlah frame yang dikirim per prediksi (di-resample ke 90)      |
-| `MIN_WINDOW_FRAMES`          | 24      | Minimum frame sebelum prediksi pertama                          |
-| `STRIDE_FRAMES`              | 3       | Geser window tiap N frame (makin kecil = makin responsif)       |
-| `PREDICTION_THRESHOLD`       | 0.90    | Confidence minimum (setelah smoothing) agar label diterima      |
-| `TOP1_MARGIN`                | 0.20    | Selisih minimum top-1 vs top-2 (menolak prediksi ambigu)        |
-| `PROB_SMOOTH_ALPHA`          | 0.45    | Bobot prediksi terbaru pada EMA probabilitas (kecil = halus)    |
-| `VOTE_WINDOW`                | 4       | Jumlah prediksi terakhir yang dipakai untuk vote                |
-| `STABLE_PREDICTIONS`         | 3       | Prediksi konsisten berturut-turut sebelum masuk teks            |
-| `MIN_VOTE_SHARE`             | 0.80    | Porsi minimum label yang sama dalam `VOTE_WINDOW`               |
+| `MIN_WINDOW_FRAMES`          | 20      | Minimum frame sebelum prediksi pertama                          |
+| `STRIDE_FRAMES`              | 2       | Geser window tiap N frame (makin kecil = makin responsif)       |
+| `PREDICTION_THRESHOLD`       | 0.86    | Confidence minimum (setelah smoothing) agar label diterima      |
+| `TOP1_MARGIN`                | 0.15    | Selisih minimum top-1 vs top-2 (menolak prediksi ambigu)        |
+| `PROB_SMOOTH_ALPHA`          | 0.50    | Bobot prediksi terbaru pada EMA                                  |
+| `VOTE_WINDOW`                | 3       | Jumlah prediksi terakhir yang dipakai untuk vote                |
+| `STABLE_PREDICTIONS`         | 2       | Prediksi konsisten berturut-turut sebelum masuk teks            |
+| `MIN_VOTE_SHARE`             | 0.67    | Porsi minimum label yang sama dalam `VOTE_WINDOW`               |
 | `LOCK_AFTER_COMMIT`          | 1       | Kunci decoder setelah commit (satu gerakan = satu output)       |
-| `REPEAT_COOLDOWN_SECONDS`    | 0.8     | Jeda minimum sebelum gestur berikutnya boleh dikomit            |
-| `COMMIT_COOLDOWN_SECONDS`    | 0.4     | Jeda minimum antar-commit                                       |
-| `MIN_HOLD_SECONDS`           | 0.25    | Lama gestur harus ditahan stabil sebelum boleh commit           |
+| `REPEAT_COOLDOWN_SECONDS`    | 0.45    | Jeda minimum sebelum gestur berikutnya boleh dikomit            |
+| `COMMIT_COOLDOWN_SECONDS`    | 0.25    | Jeda minimum antar-commit                                       |
+| `MIN_HOLD_SECONDS`           | 0.16    | Lama gestur harus ditahan stabil sebelum boleh commit           |
 | `REQUIRE_GESTURE`            | 1       | Wajib gerakan dulu sebelum commit                               |
 | `REQUIRE_STABLE_MOTION`      | 1       | Wajib tangan berhenti stabil sebelum commit                     |
-| `GESTURE_MOTION_THRESHOLD`   | 0.020   | Besar gerakan (koordinat gambar) yang dianggap memulai gestur   |
+| `GESTURE_MOTION_THRESHOLD`   | 0.018   | Besar gerakan (koordinat gambar) yang dianggap memulai gestur   |
 | `STABLE_MOTION_THRESHOLD`    | 0.035   | Ambang tangan dianggap diam (fitur ternormalisasi)              |
 | `STABILITY_FRAMES`           | 4       | Jumlah frame diam berturut-turut agar dianggap stabil           |
-| `GESTURE_TIMEOUT_SECONDS`    | 5.0     | Batas waktu dari gerakan sampai commit                          |
+| `GESTURE_TIMEOUT_SECONDS`    | 4.0     | Batas waktu dari gerakan sampai commit                          |
 | `HAND_SLOT_TRACKING`         | 1       | Tempelkan slot tangan ke frame sebelumnya (anti slot tertukar)  |
-| `RELEASE_AFTER_EMPTY_FRAMES` | 6       | Frame tanpa tangan sebelum window & kunci dilepas               |
-| `MIN_ACTIVE_RATIO`           | 0.6     | Proporsi frame berisi tangan minimum untuk inferensi            |
+| `RELEASE_AFTER_EMPTY_FRAMES` | 5       | Frame tanpa tangan sebelum window & kunci dilepas               |
+| `MIN_ACTIVE_RATIO`           | 0.60    | Proporsi frame berisi tangan minimum untuk inferensi            |
 | `SHOW_STATUS`                | 0       | Tampilkan baris status di video (0 = sembunyikan)               |
 | `CAPTURE_WIDTH/HEIGHT`       | 640/480 | Resolusi kamera (lebih kecil = lebih lancar)                    |
 | `CAPTURE_FPS`                | 30      | Target FPS kamera                                               |
-| `JPEG_QUALITY`               | 80      | Kualitas JPEG saat memakai backend `docker`                     |
+| `JPEG_QUALITY`               | 82      | Kualitas JPEG saat memakai backend `docker`                     |
 | `TEXT_LIMIT`                 | 160     | Panjang maksimum teks yang disimpan                             |
 | `DEBUG`                      | 0       | Cetak top-5 prediksi tiap inferensi + nilai motion              |
 

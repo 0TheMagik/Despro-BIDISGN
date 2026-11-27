@@ -5,6 +5,12 @@ services:
       dockerfile: Deployment/handlandmarker/Dockerfile
     ports:
       - "8001:8080"
+    environment:
+      # Ambang rendah agar dua tangan cepat terdeteksi; kestabilan output
+      # ditangani oleh decoder di client.
+      HAND_DETECTION_CONFIDENCE: "0.20"
+      HAND_PRESENCE_CONFIDENCE: "0.20"
+      HAND_TRACKING_CONFIDENCE: "0.20"
     restart: unless-stopped
 
   model:

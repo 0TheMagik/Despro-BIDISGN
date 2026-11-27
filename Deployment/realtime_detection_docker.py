@@ -240,7 +240,10 @@ def load_config(args: argparse.Namespace) -> Config:
 
     return Config(
         handlandmarker_url=os.getenv("HANDLANDMARKER_URL", "http://localhost:8001").rstrip("/"),
-        model_url=os.getenv("MODEL_URL", "https://despro-bidisgn-model-1031455690132.asia-southeast2.run.app/").rstrip("/"),
+        model_url=os.getenv(
+            "MODEL_URL",
+            "https://despro-bidisgn-model-1031455690132.asia-southeast2.run.app",
+        ).rstrip("/"),
         landmark_backend=backend,
         landmark_model_path=landmark_model_path,
         window_frames=window_frames,
