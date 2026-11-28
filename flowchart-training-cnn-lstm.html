@@ -427,16 +427,18 @@
     </div>
     <div class="note">
       <h3>Normalisasi harus sama dengan runtime</h3>
-      <p>Notebook menormalisasi per frame (kurangi wrist, bagi max-norm per frame) dan
-      <code>realtime_detection.py</code> menerapkan rumus yang sama per frame. Yang berbeda adalah asal
-      90 frame: notebook me-resample setiap video ke 90 frame, sedangkan runtime mengandalkan
-      <code>deque(maxlen=90)</code> yang terisi penuh secara alami.</p>
+      <p>Notebook training me-resample setiap video menjadi 90 frame sebelum normalisasi. Runtime mandiri
+      <code>realtime_detection.py</code> mengumpulkan window 90 frame dari webcam dan menormalisasi landmark
+      per frame sebelum inferensi. Service Docker melakukan resampling input ke panjang sequence checkpoint.
+      Runtime mandiri memuat checkpoint <code>Prototipe kode versi pytorch/best_model</code>, sedangkan
+      Docker memuat <code>Deployment/model/deployment_model</code>; bobot dan daftar kelasnya dapat berbeda.</p>
     </div>
   </div>
 
   <footer>
-    Sumber: <code>Prototipe kode versi pytorch/train_cnn_lstm_pytorch.ipynb</code> &mdash; sel 16&ndash;46.
-    Normalisasi runtime dibandingkan dengan <code>realtime_detection.py</code> di repo yang sama.
+    Sumber training: <code>Prototipe kode versi pytorch/train_cnn_lstm_pytorch.ipynb</code> &mdash; sel 16&ndash;46.
+    Runtime inference: <code>realtime_detection.py</code> dan <code>Deployment/model/app.py</code>
+    (checkpoint berbeda).
   </footer>
 
 </div>

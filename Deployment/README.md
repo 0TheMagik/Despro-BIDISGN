@@ -32,36 +32,55 @@ Contoh alur test:
 2. Ambil field `keypoints` dari response.
 3. Kirim `instances: [keypoints]` ke `POST /predict` pada service model.
 
-## Aplikasi realtime client Python (output teks)
+## Deteksi realtime mandiri (output teks)
 
-Jalankan [Deployment/realtime_detection_docker.py](Deployment/realtime_detection_docker.py):
-
-```bash
-python Deployment/realtime_detection_docker.py
-```
-
-Fitur:
-
-- **Cepat**: landmark tangan diproses MediaPipe lokal (default `LANDMARK_BACKEND=auto`) sehingga tidak ada round-trip HTTP per frame. Inferensi model berjalan di thread terpisah, jadi loop kamera tetap lancar. Untuk tetap memakai container: `--backend docker`.
-- **Sliding window**: window default 45 frame digeser tiap 6 frame. Service model me-resample ke 90 frame + normalisasi (sama seperti training), sehingga prediksi baru muncul kira-kira tiap 0.2 detik setelah window terisi.
-- **Output teks**: huruf A-Z otomatis digabung menjadi kata, label kata otomatis diberi spasi.
-- **Anti-noise**: teks hanya dikomit setelah tangan diam sesaat, confidence ≥ 95%, margin top-1 vs top-2 ≥ 20%, dan label konsisten 5 prediksi berturut-turut. Setelah dikomit, label yang sama tidak diulang sampai tangan dilepas/digerakkan lagi.
-- Kontrol keyboard: `SPACE` menambah spasi, `BACKSPACE` menghapus, `C` reset teks, `Q` keluar.
-
-Kalau service tidak ada di `localhost`, atur environment variable:
+Untuk memakai webcam, MediaPipe, dan model CNN-LSTM PyTorch langsung di komputer—tanpa service Docker
+atau Cloud—jalankan:
 
 ```bash
-set HANDLANDMARKER_URL=http://127.0.0.1:8001
-set MODEL_URL=http://127.0.0.1:8002
+python realtime_detection.py
 ```
 
-### Catatan penting (pipeline harus sama dengan training)
+Secara default, script memuat checkpoint `best_model` dari
+`Prototipe kode versi pytorch/best_model/model_cnn_lstm_isyarat.pt`. Untuk membandingkannya dengan
+`base_model`, pilih checkpoint melalui PowerShell:
 
-1. Frame dikirim **tanpa mirror** (flip hanya untuk tampilan), supaya koordinat MediaPipe sama persis dengan dataset yang direkam `dataset_collection_V2.py`.
-2. Model service melakukan **resample ke 90 frame + normalisasi wrist-relative** persis seperti `normalize_sequence()` pada notebook training PyTorch.
-3. Urutan label diambil dari checkpoint `.pt` (`actions`, sorted A-Z lalu kata) dan divalidasi dengan `Deployment/model/deployment_model/labels.json`. Jangan mengubah urutan label secara manual.
-4. Service handlandmarker memakai confidence detection `0.2` (sama dengan resep `video_to_numpy.py`). Untuk backend lokal, atur lewat env `HAND_DETECTION_CONFIDENCE`, `HAND_PRESENCE_CONFIDENCE`, `HAND_TRACKING_CONFIDENCE`.
-5. Mode ketat bisa dilonggarkan lewat `.env` (turunkan `PREDICTION_THRESHOLD`/`STABLE_PREDICTIONS`, atau set `REQUIRE_GESTURE=0`), tetapi output akan lebih mudah noise. Untuk mengulang huruf/kata yang sama, lepaskan tangan sebentar (minimal `RELEASE_AFTER_EMPTY_FRAMES` frame) lalu sign lagi.
+```powershell
+$env:REALTIME_MODEL = "base"
+python realtime_detection.py
+
+# Ubah kembali untuk menguji best model
+$env:REALTIME_MODEL = "best"
+python realtime_detection.py
+```
+
+Script mengumpulkan sequence webcam sepanjang metadata checkpoint (default 90 frame), menormalisasi
+landmark, lalu menjalankan inferensi PyTorch langsung.
+Huruf A-Z digabung menjadi teks, sedangkan prediksi kata diberi spasi di panel `Teks`. Checkpoint ini
+berbeda dari checkpoint service Docker, jadi kelas yang tersedia dan hasil prediksi bisa berbeda.
+
+- MediaPipe memproses landmark di komputer dan inferensi PyTorch berjalan di thread terpisah.
+- Prediksi hanya ditambahkan setelah stabil pada minimal 2 dari 3 prediksi dan confidence di atas 0.35.
+- Ambang confidence bisa diubah dengan `REALTIME_CONFIDENCE_THRESHOLD` (misalnya `0.25` untuk lebih sensitif).
+- Label yang sama tidak ditambahkan berulang sampai tangan tidak terlihat selama 8 frame.
+- Kontrol: `SPACE` menambah spasi, `BACKSPACE` menghapus, `C` reset teks, `Q` keluar.
+
+Gunakan [Deployment/realtime_detection_docker.py](Deployment/realtime_detection_docker.py) bila ingin
+client yang memanggil service handlandmarker/model melalui HTTP. Untuk menguji seluruh service di Docker
+lokal, jalankan:
+
+```powershell
+docker compose -f Deployment\docker-compose.yml up --build -d
+$env:MODEL_URL = "http://localhost:8002"
+python Deployment\realtime_detection_docker.py --backend docker
+```
+
+### Catatan penting
+
+1. Frame kamera asli diproses tanpa mirror; flip hanya untuk preview.
+2. Standalone memakai window 90 frame dan normalisasi landmark per frame. Model service Docker me-resample input ke panjang sequence training sebelum inferensi.
+3. Label standalone diambil dari field `actions` checkpoint `best_model`; label service Docker berasal dari checkpoint/sidecar berbeda. Jangan menukar urutan label antar-checkpoint.
+4. Untuk mengulang label yang sama, lepaskan tangan dari kamera setidaknya 8 frame.
 
 ### Pengaturan client (file `Deployment/.env`)
 
@@ -170,7 +189,7 @@ Sequence boleh berapa pun panjangnya (mis. 45 frame); service akan resample ke p
 
 ## Catatan penting
 
-- `realtime_detection.py` tetap berguna untuk local webcam testing, tetapi tidak cocok langsung dipindah ke Cloud Run karena bergantung pada kamera lokal.
-- Model service memakai `Deployment/model/deployment_model/model_cnn_lstm_isyarat.pt` (97 kelas: A-Z + kata). File `.keras` lama hanya 10 kelas; jika ingin memakainya, set `MODEL_PATH` dan sediakan `labels.json` yang sesuai.
+- `realtime_detection.py` memakai checkpoint PyTorch secara lokal (`best_model` secara default; pilih `base` dengan `REALTIME_MODEL`). `Deployment/realtime_detection_docker.py` adalah client terpisah untuk service HTTP lokal atau Cloud.
+- Model service Docker memakai checkpoint `Deployment/model/deployment_model/model_cnn_lstm_isyarat.pt` (97 kelas: A-Z + kata). Kedua checkpoint adalah file berbeda dan dapat memiliki label/hasil berbeda. File `.keras` lama hanya 10 kelas.
 - Image model memakai PyTorch CPU (bukan TensorFlow), sehingga build lebih ringan dan inferensi cepat tanpa GPU.
 - Hasil terbaik didapat jika pencahayaan cukup, satu/dua tangan terlihat penuh, dan gestur ditahan ~1 detik.

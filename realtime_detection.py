@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import os
+import textwrap
+from pathlib import Path
 
 # Paksa eksekusi di CPU dengan menonaktifkan GPU CUDA Visibility
 #os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -14,6 +16,7 @@ import time
 
 # Setup PyTorch CPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+torch.set_num_threads(max(1, int(os.getenv("TORCH_NUM_THREADS", "4"))))
 print(f"Menjalankan model PyTorch menggunakan {device}.")
 
 # 1. Setup Class Labels berdasarkan folder dataset (88 classes dari training terbaru)
@@ -113,15 +116,28 @@ class CNNLSTM(nn.Module):
 
 
 # 3. Muat Model PyTorch
-MODEL_DIR = os.path.join('Prototipe kode versi pytorch', 'best_model')
-MODEL_PATH = os.path.join(MODEL_DIR, 'model_cnn_lstm_isyarat.pt')
+ROOT_DIR = Path(__file__).resolve().parent
+MODEL_VARIANT = os.getenv("REALTIME_MODEL", "best").strip().lower()
+MODEL_DIRECTORIES = {
+    "best": "best_model",
+    "base": "base_model",
+}
+if MODEL_VARIANT not in MODEL_DIRECTORIES:
+    raise ValueError("REALTIME_MODEL harus bernilai 'best' atau 'base'.")
 
-if not os.path.exists(MODEL_PATH):
-    print(f"Model tidak ditemukan di {MODEL_PATH}, mencoba base_model...")
-    MODEL_DIR = os.path.join('Prototipe kode versi pytorch', 'base_model')
-    MODEL_PATH = os.path.join(MODEL_DIR, 'model_cnn_lstm_isyarat.pt')
+MODEL_PATH = (
+    ROOT_DIR
+    / 'Prototipe kode versi pytorch'
+    / MODEL_DIRECTORIES[MODEL_VARIANT]
+    / 'model_cnn_lstm_isyarat.pt'
+)
+if not MODEL_PATH.is_file():
+    raise FileNotFoundError(
+        f"Checkpoint {MODEL_VARIANT}_model tidak ditemukan: {MODEL_PATH}"
+    )
 
-checkpoint = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+checkpoint = torch.load(str(MODEL_PATH), map_location=device, weights_only=False)
+print(f"Checkpoint realtime: {MODEL_VARIANT} ({MODEL_PATH})")
 model_config = checkpoint.get("model_config", {})
 saved_actions = checkpoint.get("actions", None)
 
@@ -133,6 +149,12 @@ else:
     print(f"Actions default digunakan: {actions}")
 
 num_classes = len(actions)
+VIDEO_FRAMES = int(checkpoint.get("video_frames", VIDEO_FRAMES))
+model_features = int(checkpoint.get("features", FEATURES))
+if model_features != FEATURES:
+    raise RuntimeError(
+        f"Checkpoint best_model membutuhkan {model_features} fitur; script menghasilkan {FEATURES}."
+    )
 print(f"Jumlah kelas: {num_classes}")
 
 model = CNNLSTM(num_classes=num_classes, **model_config).to(device)
@@ -147,18 +169,26 @@ HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-hand_detection_confidence = 0.3
-hand_presence_confidence = 0.3
+hand_detection_confidence = float(os.getenv("HAND_DETECTION_CONFIDENCE", "0.35"))
+hand_presence_confidence = float(os.getenv("HAND_PRESENCE_CONFIDENCE", "0.35"))
+hand_tracking_confidence = float(os.getenv("HAND_TRACKING_CONFIDENCE", "0.35"))
+for name, value in (
+    ("HAND_DETECTION_CONFIDENCE", hand_detection_confidence),
+    ("HAND_PRESENCE_CONFIDENCE", hand_presence_confidence),
+    ("HAND_TRACKING_CONFIDENCE", hand_tracking_confidence),
+):
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(f"{name} harus antara 0 dan 1.")
 
 options = HandLandmarkerOptions(
     base_options=BaseOptions(
-        model_asset_path=os.path.join('handlandmarker', 'hand_landmarker.task')
+        model_asset_path=str(ROOT_DIR / 'handlandmarker' / 'hand_landmarker.task')
     ),
     running_mode=VisionRunningMode.VIDEO,
     num_hands=2,
     min_hand_detection_confidence=hand_detection_confidence,
     min_hand_presence_confidence=hand_presence_confidence,
-    min_tracking_confidence=0.3
+    min_tracking_confidence=hand_tracking_confidence
 )
 
 # Koneksi antar landmark tangan untuk visualisasi skeleton tangan
@@ -196,51 +226,69 @@ def draw_hand_landmarks(image, results, mirror=False):
 
 
 # 5. Fungsi Ekstraksi Keypoint (Sesuai dengan saat training/preprocessing)
-last_valid_keypoints = None  # Simpan frame terakhir yang valid untuk fallback saat tracking hilang
-
 def extract_keypoints(results):
-    global last_valid_keypoints
+    """Ambil keypoint dengan urutan yang kompatibel dengan data training.
 
-    if results and getattr(results, "hand_landmarks", None):
-        landmarks_list = []
-        for hand in results.hand_landmarks[:2]:  # Max 2 hands
-            for landmark in hand:
-                landmarks_list.extend([landmark.x, landmark.y, landmark.z])
+    Default ``legacy`` mempertahankan urutan MediaPipe seperti pipeline lama.
+    Mode ``handedness`` menempatkan kiri lalu kanan dan berguna bila urutan
+    MediaPipe sering bertukar saat tangan overlap.
+    """
+    hands = list(results.hand_landmarks[:2]) if results and getattr(results, "hand_landmarks", None) else []
+    if os.getenv("REALTIME_HAND_ORDER", "legacy").strip().lower() == "handedness" and hands:
+        ordered_hands = [None, None]  # slot 0 = left, slot 1 = right
+        handedness_list = getattr(results, "handedness", []) or []
+        for index, hand in enumerate(hands):
+            label = ""
+            if index < len(handedness_list) and handedness_list[index]:
+                label = str(handedness_list[index][0].category_name).lower()
+            target = 0 if label == "left" else 1 if label == "right" else None
+            if target is not None and ordered_hands[target] is None:
+                ordered_hands[target] = hand
+            elif ordered_hands[0] is None:
+                ordered_hands[0] = hand
+            elif ordered_hands[1] is None:
+                ordered_hands[1] = hand
+        hands = [hand for hand in ordered_hands if hand is not None]
 
-        arr = np.array(landmarks_list, dtype=np.float32)
+    values = []
+    for hand in hands:
+        for landmark in hand:
+            values.extend([landmark.x, landmark.y, landmark.z])
+    values.extend([0.0] * (126 - len(values)))
+    return normalize_sequence(np.asarray(values[:126], dtype=np.float32))
 
-        # Pad with zeros if less than 126 (e.g. only 1 hand detected)
-        if arr.shape[0] < 126:
-            arr = np.concatenate([arr, np.zeros(126 - arr.shape[0], dtype=np.float32)])
 
-        # Terapkan normalisasi yang sama dengan preprocessing training
-        arr = normalize_sequence(arr[:126])
-        last_valid_keypoints = arr  # Simpan sebagai fallback
-        return arr
-
-    # Jika tracking hilang, pakai frame terakhir yang valid (smooth interpolation)
-    if last_valid_keypoints is not None:
-        return last_valid_keypoints
-    return np.zeros(126, dtype=np.float32)
+def has_hands(results):
+    return bool(results and getattr(results, "hand_landmarks", None))
 
 # 6. Program Utama Deteksi Real-time
-SEQ_LEN = 90
-sequence = deque(maxlen=SEQ_LEN)        # Buffer untuk menyimpan 90 frame terakhir
-threshold = 0.6                          # Confidence Threshold
+SEQ_LEN = VIDEO_FRAMES
+sequence = deque(maxlen=SEQ_LEN)        # Buffer untuk menyimpan satu sequence model
+threshold = float(os.getenv("REALTIME_CONFIDENCE_THRESHOLD", "0.35"))
+if not 0.0 <= threshold <= 1.0:
+    raise ValueError("REALTIME_CONFIDENCE_THRESHOLD harus antara 0 dan 1.")
 predicted_action = "-"
 predicted_confidence = 0.0
-predictions_history = deque(maxlen=5)    # Histori untuk stabilisasi prediksi
+predictions_history = deque(maxlen=3)    # Histori untuk stabilisasi prediksi
+recognized_text = ""
+last_committed_action = None
+empty_hand_frames = 0
 frame_counter = 0
 prediction_thread = None
 pred_lock = threading.Lock()
+last_valid_keypoints = None
+missing_keypoint_frames = 0
+MAX_KEYPOINT_HOLD_FRAMES = int(os.getenv("MAX_KEYPOINT_HOLD_FRAMES", "3"))
 
-cap = cv2.VideoCapture(0)  # Ganti ke angka lain jika kamera tidak terdeteksi (misal 1, 2, 3)
+cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     print("Kamera indeks 0 tidak tersedia, mencoba indeks 1...")
     cap = cv2.VideoCapture(1)
 if not cap.isOpened():
     print("Kamera indeks 1 tidak tersedia, mencoba indeks 2...")
     cap = cv2.VideoCapture(2)
+if not cap.isOpened():
+    raise RuntimeError("Kamera tidak dapat dibuka. Periksa kamera atau ubah indeks kamera.")
 
 # Cek spesifikasi kamera
 print(f"Resolution: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
@@ -252,34 +300,79 @@ fps_counter = 0
 def predict_action(input_data):
     global predicted_action, predicted_confidence
 
-    # Konversi ke tensor PyTorch
-    input_tensor = torch.from_numpy(input_data).float().to(device)
+    active_ratio = np.mean(np.abs(input_data[0]).sum(axis=1) > 1e-6)
+    if active_ratio < 0.6:
+        with pred_lock:
+            predictions_history.clear()
+            predicted_action = "-"
+            predicted_confidence = 0.0
+        return
 
-    with torch.no_grad():
+    input_tensor = torch.from_numpy(input_data).float().to(device)
+    with torch.inference_mode():
         logits = model(input_tensor)
         probs = torch.softmax(logits, dim=1)
         best_idx = int(probs.argmax(dim=1).item())
         best_conf = float(probs[0, best_idx].item())
 
-    if best_conf > threshold:
-        current_pred = actions[best_idx]
-    else:
-        current_pred = "-"
+    current_pred = actions[best_idx] if best_conf > threshold else "-"
 
     with pred_lock:
-        predictions_history.append(current_pred)
-        predicted_confidence = best_conf
+        predictions_history.append((str(current_pred), best_conf))
+        counts = {}
+        for label, _ in predictions_history:
+            if label == "-":
+                continue
+            counts[label] = counts.get(label, 0) + 1
+        if not counts:
+            predicted_action = "-"
+            predicted_confidence = best_conf
+            return
 
-        # Stabilisasi: ambil prediksi terbanyak dari 5 riwayat terakhir
-        if len(predictions_history) == predictions_history.maxlen:
-            counts = {}
-            for p in predictions_history:
-                counts[p] = counts.get(p, 0) + 1
-            stable_pred = max(counts, key=counts.get)
-        else:
-            stable_pred = current_pred
+        stable_pred = max(counts, key=counts.get)
+        if counts[stable_pred] < 2:
+            predicted_action = "-"
+            predicted_confidence = best_conf
+            return
 
+        stable_scores = [score for label, score in predictions_history if label == stable_pred]
         predicted_action = stable_pred
+        predicted_confidence = sum(stable_scores) / len(stable_scores)
+
+
+def append_label_to_text(label):
+    global recognized_text
+
+    label = str(label).strip()
+    if not label:
+        return
+    if len(label) == 1 and label.isalpha():
+        recognized_text += label.upper()
+    else:
+        if recognized_text and not recognized_text.endswith(" "):
+            recognized_text += " "
+        recognized_text += label + " "
+
+
+def draw_text_panel(image, text):
+    h, w = image.shape[:2]
+    panel_top = max(60, h - 105)
+    overlay = image.copy()
+    cv2.rectangle(overlay, (0, panel_top), (w, h - 24), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.65, image, 0.35, 0, image)
+    cv2.putText(
+        image, "Teks:", (10, panel_top + 20),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1, cv2.LINE_AA
+    )
+
+    display_text = text.rstrip() or "(belum ada teks)"
+    line_width = max(16, int((w - 20) / 11))
+    lines = textwrap.wrap(display_text, width=line_width) or [display_text]
+    for index, line in enumerate(lines[-2:]):
+        cv2.putText(
+            image, line, (10, panel_top + 49 + index * 22),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 1, cv2.LINE_AA
+        )
 
 
 def put_text_with_bg(img, text, org, font_scale=0.7, color=(255, 255, 255),
@@ -312,8 +405,29 @@ with HandLandmarker.create_from_options(options) as landmarker:
         timestamp_ms = int(time.time() * 1000)
         results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
-        # Ekstraksi keypoints dari frame asli untuk model
+        # Ekstraksi keypoints dari frame asli untuk model.
+        # Pertahankan frame valid terakhir sebentar saat tracking putus,
+        # karena overlap jari sering membuat MediaPipe kehilangan tangan 1-3 frame.
         keypoints = extract_keypoints(results)
+        hand_present = has_hands(results)
+        if hand_present:
+            last_valid_keypoints = keypoints.copy()
+            missing_keypoint_frames = 0
+            empty_hand_frames = 0
+        else:
+            missing_keypoint_frames += 1
+            empty_hand_frames += 1
+            if last_valid_keypoints is not None and missing_keypoint_frames <= MAX_KEYPOINT_HOLD_FRAMES:
+                keypoints = last_valid_keypoints.copy()
+            if empty_hand_frames == 8:
+                sequence.clear()
+                last_valid_keypoints = None
+                missing_keypoint_frames = 0
+                with pred_lock:
+                    predictions_history.clear()
+                    predicted_action = "-"
+                    predicted_confidence = 0.0
+                last_committed_action = None
 
         # Buat frame display dengan mirror agar terasa natural seperti cermin
         frame = cv2.flip(frame, 1)
@@ -341,6 +455,14 @@ with HandLandmarker.create_from_options(options) as landmarker:
             cur_conf = predicted_confidence
         cv2.putText(frame, f'Deteksi: {cur_action}  ({cur_conf*100:.1f}%)',
                     (10, 33), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        if (
+            hand_present
+            and cur_action != "-"
+            and cur_conf > threshold
+            and cur_action != last_committed_action
+        ):
+            append_label_to_text(cur_action)
+            last_committed_action = cur_action
 
         # FPS counter
         fps_counter += 1
@@ -359,15 +481,30 @@ with HandLandmarker.create_from_options(options) as landmarker:
                       (bar_x + int(bar_w * fill_ratio), 38),
                       (0, 200, 0) if fill_ratio >= 1 else (0, 165, 255), -1)
 
-        # Petunjuk tombol
-        cv2.putText(frame, "[Q] Keluar",
-                    (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                    (200, 200, 200), 1, cv2.LINE_AA)
+        draw_text_panel(frame, recognized_text)
+        cv2.putText(
+            frame,
+            "[Q] Keluar  [SPACE] Spasi  [BACKSPACE] Hapus  [C] Reset",
+            (10, h - 7),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.4,
+            (210, 210, 210),
+            1,
+            cv2.LINE_AA,
+        )
 
         cv2.imshow('Deteksi BISINDO Realtime', frame)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        if key == 32:
+            if recognized_text and not recognized_text.endswith(" "):
+                recognized_text += " "
+        elif key in (8, 127):
+            recognized_text = recognized_text.rstrip()[:-1]
+        elif key in (ord('c'), ord('C')):
+            recognized_text = ""
 
 cap.release()
 cv2.destroyAllWindows()
